@@ -9,6 +9,28 @@ weight: 80
 
 A tool block may include `block.tool.diff` or `block.tool.grep`. They contain source data for a Lua renderer. They are separate from the temporary native tool-body marker.
 
+### Plain tool bodies
+
+`block.tool.body` is present for plain, directory, todo, and legacy batch output. Unsupported and interactive collapsed bodies use the native tool marker until action dispatch is available.
+
+```lua
+block.tool.body = {
+  kind = "plain", -- "plain", "read_dir", "batch", or "todo_list"
+  text = "raw source output", -- text bodies
+  legacy = true, -- batch only
+  display = {
+    expanded = false,
+    limit = { configured = 20, visible_lines = 20, total_lines = 42 },
+    truncation = {
+      head_hidden = 0, tail_hidden = 22,
+      visible_start = 1, visible_end = 20,
+    },
+  },
+}
+```
+
+Todo bodies use `items = { { content, status, priority? }, ... }` rather than `text`. `visible_start` and `visible_end` are 1-based inclusive logical source-line indices for text bodies and item indices for todo. `truncation` is absent when no entries are hidden. When present, `head_hidden + visible_lines + tail_hidden = total_lines`. A 0/0 visible window is only valid for an empty source or an explicit empty selection.
+
 ### Diff
 
 ```lua

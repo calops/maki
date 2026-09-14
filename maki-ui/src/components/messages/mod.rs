@@ -906,7 +906,19 @@ impl MessagesPanel {
             let id = BlockId::new(index as u64);
             let revision = segment.revision();
             if block_render.needs(id, revision, &key) {
-                let block = block::project(message);
+                let (output_limit, output_expanded) = match &message.role {
+                    DisplayRole::Tool(tool) => (
+                        tool_output_lines.get(&tool.name),
+                        expanded_tools
+                            .get(&tool.id)
+                            .copied()
+                            .unwrap_or_default()
+                            .output,
+                    ),
+                    _ => (0, false),
+                };
+                let block =
+                    block::project_with_tool_display(message, output_limit, output_expanded);
                 block_render.request(id, revision, block, key.clone(), |block, ctx| {
                     lua_event_handle.request_render_block(block, ctx)
                 });

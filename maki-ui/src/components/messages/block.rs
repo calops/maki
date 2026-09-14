@@ -84,7 +84,16 @@ fn phase(role: &DisplayRole) -> &'static str {
 }
 
 /// Structured content plus metadata, never default-rendered lines.
+#[allow(dead_code)]
 pub(crate) fn project(message: &DisplayMessage) -> serde_json::Value {
+    project_with_tool_display(message, 0, false)
+}
+
+pub(crate) fn project_with_tool_display(
+    message: &DisplayMessage,
+    output_limit: usize,
+    output_expanded: bool,
+) -> serde_json::Value {
     let mut block = serde_json::Map::new();
     block.insert("kind".into(), kind(&message.role).into());
     block.insert("text".into(), message.text.clone().into());
@@ -119,14 +128,22 @@ pub(crate) fn project(message: &DisplayMessage) -> serde_json::Value {
         }
     }
     if let DisplayRole::Tool(tool) = &message.role {
-        block.insert("tool".into(), tool_block(message, &tool.name));
+        block.insert(
+            "tool".into(),
+            tool_block(message, &tool.name, output_limit, output_expanded),
+        );
     }
     serde_json::Value::Object(block)
 }
 
 /// The structured `tool` object: identity, lifecycle, and the header content
 /// a renderer needs, never a pre-rendered string.
-fn tool_block(message: &DisplayMessage, name: &str) -> serde_json::Value {
+fn tool_block(
+    message: &DisplayMessage,
+    name: &str,
+    output_limit: usize,
+    output_expanded: bool,
+) -> serde_json::Value {
     let header_text = message
         .text
         .split_once('\n')
@@ -159,6 +176,9 @@ fn tool_block(message: &DisplayMessage, name: &str) -> serde_json::Value {
     }
     tool.insert("header".into(), header);
     if let Some(output) = &message.tool_output {
+        if let Some(body) = tool_body_projection(output, output_limit, output_expanded) {
+            tool.insert("body".into(), body);
+        }
         match output.as_ref() {
             ToolOutput::Diff {
                 path,
@@ -175,6 +195,73 @@ fn tool_block(message: &DisplayMessage, name: &str) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(tool)
+}
+
+fn tool_body_projection(
+    output: &ToolOutput,
+    limit: usize,
+    expanded: bool,
+) -> Option<serde_json::Value> {
+    let (kind, text, legacy) = match output {
+        ToolOutput::Plain(text) => ("plain", text.text.as_str(), false),
+        ToolOutput::ReadDir(text) => ("read_dir", text.text.as_str(), false),
+        ToolOutput::Batch { text } => ("batch", text.as_str(), true),
+        ToolOutput::TodoList(items) => {
+            let total_lines = items.len();
+            return Some(serde_json::json!({
+                "kind": "todo_list",
+                "items": items,
+                "display": body_display(total_lines, total_lines, limit, expanded),
+            }));
+        }
+        _ => return None,
+    };
+    let total_lines = logical_line_count(text);
+    let visible_lines = if expanded || limit == 0 {
+        total_lines
+    } else {
+        total_lines.min(limit)
+    };
+    Some(serde_json::json!({
+        "kind": kind,
+        "text": text,
+        "legacy": legacy.then_some(true),
+        "display": body_display(total_lines, visible_lines, limit, expanded),
+    }))
+}
+
+fn logical_line_count(text: &str) -> usize {
+    if !text.is_empty() {
+        text.lines().count()
+    } else {
+        0
+    }
+}
+
+fn body_display(
+    total_lines: usize,
+    visible_lines: usize,
+    configured: usize,
+    expanded: bool,
+) -> serde_json::Value {
+    let hidden = total_lines.saturating_sub(visible_lines);
+    let truncation = (hidden > 0).then(|| {
+        serde_json::json!({
+            "head_hidden": 0,
+            "tail_hidden": hidden,
+            "visible_start": if visible_lines == 0 { 0 } else { 1 },
+            "visible_end": visible_lines,
+        })
+    });
+    serde_json::json!({
+        "expanded": expanded,
+        "limit": {
+            "configured": configured,
+            "visible_lines": visible_lines,
+            "total_lines": total_lines,
+        },
+        "truncation": truncation,
+    })
 }
 
 fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serde_json::Value {
@@ -615,6 +702,28 @@ mod tests {
         assert_eq!(images[0]["media_type"], ImageMediaType::Png.mime());
         assert_eq!(images[0]["bytes"], PNG_PAYLOAD.len());
         assert!(!block.to_string().contains(PNG_PAYLOAD));
+    }
+
+    #[test]
+    fn plain_body_projection_keeps_source_and_display_state() {
+        let mut message = DisplayMessage::new(
+            DisplayRole::Tool(Box::new(ToolRole {
+                id: "t".to_owned(),
+                status: ToolStatus::Success,
+                name: Arc::from("bash"),
+            })),
+            "bash> cmd".to_owned(),
+        );
+        message.tool_output = Some(Arc::new(ToolOutput::Plain("one\ntwo\nthree".into())));
+        let block = project_with_tool_display(&message, 2, false);
+        let body = &block["tool"]["body"];
+        assert_eq!(body["kind"], "plain");
+        assert_eq!(body["text"], "one\ntwo\nthree");
+        assert_eq!(body["display"]["limit"]["configured"], 2);
+        assert_eq!(body["display"]["limit"]["visible_lines"], 2);
+        assert_eq!(body["display"]["truncation"]["tail_hidden"], 1);
+        let expanded = project_with_tool_display(&message, 2, true);
+        assert!(expanded["tool"]["body"]["display"]["truncation"].is_null());
     }
 
     #[test]
