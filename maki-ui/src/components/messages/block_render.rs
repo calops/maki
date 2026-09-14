@@ -170,6 +170,13 @@ mod tests {
         }
     }
 
+    fn key_theme(width: u16, theme_gen: u64) -> RenderKey {
+        RenderKey {
+            theme_gen,
+            ..key_gen(width, 7)
+        }
+    }
+
     fn send_object(block: serde_json::Value, _ctx: RenderCtx) -> flume::Receiver<BlockRender> {
         let (tx, rx) = flume::bounded(1);
         tx.send(BlockRender::Objects(vec![RenderObject::Lines {
@@ -279,6 +286,21 @@ mod tests {
         assert!(cache.objects(id, 1, &key(80)).is_none());
         assert!(cache.poll(|_, _, _| {}));
         assert_eq!(text(cache.objects(id, 1, &key(80)).unwrap()), "wide");
+    }
+
+    #[test]
+    fn theme_generation_change_re_renders() {
+        let mut cache = BlockRenderCache::default();
+        let id = BlockId::new(1);
+        object_with(id, &mut cache, 1, "old-theme", key_theme(40, 1));
+        cache.poll(|_, _, _| {});
+        object_with(id, &mut cache, 1, "new-theme", key_theme(40, 2));
+        assert!(cache.objects(id, 1, &key_theme(40, 2)).is_none());
+        assert!(cache.poll(|_, _, _| {}));
+        assert_eq!(
+            text(cache.objects(id, 1, &key_theme(40, 2)).unwrap()),
+            "new-theme"
+        );
     }
 
     #[test]

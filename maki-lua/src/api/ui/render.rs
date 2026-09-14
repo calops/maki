@@ -7,10 +7,11 @@
 //! caller keeps its own rendering. Registration order is load order, so
 //! the last plugin to register is outermost.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use maki_agent::SnapshotLine;
+use maki_agent::{SnapshotLine, SpanStyle};
 use mlua::{Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value};
 use std::ops::Range;
 
@@ -79,11 +80,12 @@ pub enum RenderObject {
 }
 
 /// A semantic style range in one logical line of a [`RenderObject::Lines`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Decoration {
     pub line: usize,
     pub bytes: Range<usize>,
     pub group: String,
+    pub style: SpanStyle,
 }
 
 /// What a block renderer chain produced.
@@ -113,6 +115,37 @@ pub(crate) struct RendererStore {
     layers: Vec<Layer>,
 }
 
+#[derive(Default)]
+pub(crate) struct DecorationGroups {
+    groups: HashMap<String, (Arc<str>, SpanStyle)>,
+    reported: HashSet<(Arc<str>, String)>,
+}
+
+impl DecorationGroups {
+    pub(crate) fn register(
+        &mut self,
+        plugin: Arc<str>,
+        name: String,
+        style: SpanStyle,
+    ) -> LuaResult<()> {
+        let group = format!("plugin.{plugin}.{name}");
+        if self.groups.contains_key(&group) {
+            return Err(mlua::Error::runtime(format!(
+                "decoration group already registered: {group}"
+            )));
+        }
+        self.groups.insert(group, (plugin, style));
+        Ok(())
+    }
+
+    fn resolve(&mut self, plugin: &str, group: &str) -> Option<SpanStyle> {
+        self.groups
+            .get(group)
+            .filter(|(owner, _)| owner.as_ref() == plugin)
+            .map(|(_, style)| style.clone())
+    }
+}
+
 impl RendererStore {
     /// Registers `key` for `plugin`, replacing any previous one. Answers
     /// the replaced key so the caller can drop its registry value.
@@ -135,6 +168,14 @@ impl RendererStore {
 /// Clears `plugin`'s renderer and drops its registry value. Shared by
 /// unload and failed-load rollback.
 pub(crate) fn clear_plugin(lua: &Lua, plugin: &str) {
+    if let Some(mut groups) = lua.app_data_mut::<DecorationGroups>() {
+        groups
+            .groups
+            .retain(|_, (owner, _)| owner.as_ref() != plugin);
+        groups
+            .reported
+            .retain(|(owner, _)| owner.as_ref() != plugin);
+    }
     let removed = lua
         .app_data_mut::<RendererStore>()
         .and_then(|mut store| store.clear_plugin(plugin));
@@ -201,10 +242,10 @@ pub(crate) async fn render_block(lua: &Lua, block: Value, ctx: Table) -> BlockRe
         Ok(funcs) => {
             let funcs = Arc::new(funcs);
             let outermost = funcs.len() as isize - 1;
-            match chain(lua, funcs, outermost, Arc::clone(&raised))
+            match chain(lua, Arc::clone(&funcs), outermost, Arc::clone(&raised))
                 .and_then(|renderer| renderer.call::<Value>((block, Value::Table(ctx))))
             {
-                Ok(value) => parse_result(value),
+                Ok(value) => parse_result(lua, value, &funcs[outermost as usize].0),
                 Err(error) => BlockRender::Failed {
                     plugin: raised
                         .lock()
@@ -271,7 +312,7 @@ pub(crate) fn failed(message: String) -> BlockRender {
     }
 }
 
-fn parse_result(value: Value) -> BlockRender {
+fn parse_result(lua: &Lua, value: Value, plugin: &Arc<str>) -> BlockRender {
     match value {
         Value::Nil | Value::Boolean(false) => BlockRender::Unhandled,
         Value::String(text) => match text.to_str() {
@@ -281,7 +322,7 @@ fn parse_result(value: Value) -> BlockRender {
             }]),
             Err(error) => failed(error.to_string()),
         },
-        Value::Table(table) => parse_objects(table),
+        Value::Table(table) => parse_objects(lua, table, plugin),
         other => failed(format!(
             "block renderer returned {}, expected a list of lines or {{raw = ...}}",
             other.type_name()
@@ -289,7 +330,7 @@ fn parse_result(value: Value) -> BlockRender {
     }
 }
 
-fn parse_objects(table: Table) -> BlockRender {
+fn parse_objects(lua: &Lua, table: Table, plugin: &Arc<str>) -> BlockRender {
     if let Some(raw) = as_raw(&table) {
         return match raw {
             Ok(object) => BlockRender::Objects(vec![object]),
@@ -300,7 +341,7 @@ fn parse_objects(table: Table) -> BlockRender {
         return BlockRender::Objects(vec![RenderObject::ToolBody]);
     }
     if let Ok(Value::Table(lines)) = table.raw_get::<Value>("lines") {
-        return parse_lines_object(lines, table);
+        return parse_lines_object(lua, lines, table, plugin);
     }
     let mut out = Vec::with_capacity(table.raw_len());
     for idx in 1..=table.raw_len() {
@@ -334,7 +375,7 @@ fn parse_objects(table: Table) -> BlockRender {
     BlockRender::Objects(out)
 }
 
-fn parse_lines_object(lines: Table, object: Table) -> BlockRender {
+fn parse_lines_object(lua: &Lua, lines: Table, object: Table, plugin: &Arc<str>) -> BlockRender {
     let mut parsed_lines = Vec::with_capacity(lines.raw_len());
     for index in 1..=lines.raw_len() {
         match lines
@@ -345,7 +386,7 @@ fn parse_lines_object(lines: Table, object: Table) -> BlockRender {
             Err(error) => return failed(error.to_string()),
         }
     }
-    let decorations = match object.raw_get::<Option<Table>>("decorations") {
+    let mut decorations = match object.raw_get::<Option<Table>>("decorations") {
         Ok(Some(decorations)) => {
             let mut parsed = Vec::with_capacity(decorations.raw_len());
             for index in 1..=decorations.raw_len() {
@@ -354,6 +395,7 @@ fn parse_lines_object(lines: Table, object: Table) -> BlockRender {
                         line: entry.raw_get("line")?,
                         bytes: entry.raw_get("start_byte")?..entry.raw_get("end_byte")?,
                         group: entry.raw_get("group")?,
+                        style: SpanStyle::Default,
                     })
                 }) {
                     Ok(decoration) if decoration.bytes.start <= decoration.bytes.end => decoration,
@@ -367,10 +409,46 @@ fn parse_lines_object(lines: Table, object: Table) -> BlockRender {
         Ok(None) => Vec::new(),
         Err(error) => return failed(error.to_string()),
     };
+    let Some(mut groups) = lua.app_data_mut::<DecorationGroups>() else {
+        return failed("decoration group store is unavailable".to_owned());
+    };
+    for decoration in &mut decorations {
+        if let Some(style) = builtin_group_style(&decoration.group) {
+            decoration.style = style;
+            continue;
+        }
+        let Some(style) = groups.resolve(plugin, &decoration.group) else {
+            let message = format!("unknown decoration group: {}", decoration.group);
+            groups
+                .reported
+                .insert((Arc::clone(plugin), message.clone()));
+            return BlockRender::Failed {
+                plugin: Arc::clone(plugin),
+                message,
+            };
+        };
+        decoration.style = style;
+    }
     BlockRender::Objects(vec![RenderObject::Lines {
         lines: parsed_lines,
         decorations,
     }])
+}
+
+fn builtin_group_style(group: &str) -> Option<SpanStyle> {
+    let name = match group {
+        "syntax.keyword" => "keyword",
+        "diff.old" => "diff_old",
+        "diff.new" => "diff_new",
+        "diff.old_sign" => "diff_old_sign",
+        "diff.new_sign" => "diff_new_sign",
+        "diff.line_nr" => "diff_line_nr",
+        "diff.old_line_nr" => "diff_old_line_nr",
+        "diff.new_line_nr" => "diff_new_line_nr",
+        "grep.match" => "match",
+        _ => return None,
+    };
+    Some(SpanStyle::Named(name.to_owned()))
 }
 
 /// A tool-body request is a marker only: the host supplies the content and
@@ -420,6 +498,7 @@ mod tests {
     fn lua_with_store() -> Lua {
         let lua = Lua::new();
         lua.set_app_data(RendererStore::default());
+        lua.set_app_data(DecorationGroups::default());
         lua
     }
 
@@ -655,9 +734,23 @@ mod tests {
             &[Decoration {
                 line: 0,
                 bytes: 1..4,
-                group: "syntax.keyword".to_owned()
+                group: "syntax.keyword".to_owned(),
+                style: SpanStyle::Named("keyword".to_owned()),
             }]
         );
+    }
+
+    #[test]
+    fn unknown_group_fails_for_owning_plugin() {
+        let lua = lua_with_store();
+        register(
+            &lua,
+            PLUGIN,
+            "function(prev, block, ctx) return { lines = { 'a' }, decorations = { { line = 0, start_byte = 0, end_byte = 1, group = 'unknown' } } } end",
+        );
+        let (plugin, message) = failure(render(&lua, json!({"kind": "user"})));
+        assert_eq!(plugin.as_ref(), PLUGIN);
+        assert_eq!(message, "unknown decoration group: unknown");
     }
 
     #[test_case("{ lines = { 'a' }, decorations = { { line = 0, start_byte = 2, end_byte = 1, group = 'x' } } }" ; "inverted_range")]

@@ -27,7 +27,7 @@ pub(crate) mod wrap;
 pub use buf::{SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, spinner_token};
 
 use crate::runtime::with_task_bufs;
-use render::set_block_renderer__doc;
+use render::{DecorationGroups, set_block_renderer__doc};
 use win::WinHandle;
 use wrap::wrap_lines;
 
@@ -817,6 +817,28 @@ fn open_win(
 }
 
 #[allow(non_upper_case_globals)]
+pub(crate) const register_decoration_group__doc: FnDoc = FnDoc {
+    name: "register_decoration_group",
+    args: "{name}, {style}",
+    desc: "Registers a plugin-owned semantic decoration group. The returned decoration group is namespaced as `plugin.<plugin>.<name>` and may be used in a Lines decoration. Built-in groups are `syntax.keyword`, `diff.old`, `diff.new`, `diff.old_sign`, `diff.new_sign`, `diff.line_nr`, `diff.old_line_nr`, `diff.new_line_nr`, and `grep.match`.",
+    params: &[
+        ParamDoc {
+            name: "{name}",
+            ty: "string",
+            desc: "Group suffix containing letters, digits, or underscores.",
+        },
+        ParamDoc {
+            name: "{style}",
+            ty: "string|table",
+            desc: "Named or inline span style.",
+        },
+    ],
+    returns: "",
+    guard: None,
+    example: "maki.ui.register_decoration_group(\"match\", { bold = true })\n-- use group = \"plugin.my_plugin.match\" in Lines decorations",
+};
+
+#[allow(non_upper_case_globals)]
 pub(crate) const set_status_hint__doc: FnDoc = FnDoc {
     name: "set_status_hint",
     args: "{spans}",
@@ -847,7 +869,7 @@ lua_table! {
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
-        manual set_block_renderer, manual set_window_title,
+        manual register_decoration_group, manual set_block_renderer, manual set_window_title,
     ]
 }
 
@@ -866,6 +888,29 @@ pub(crate) fn create_ui_table(
         open_editor__register(&t, lua, tx.clone())?;
         open_win__register(&t, lua, tx)?;
     }
+
+    let decoration_plugin = Arc::clone(&plugin);
+    t.set(
+        "register_decoration_group",
+        lua.create_function(move |lua, (name, style): (String, Value)| {
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                return Err(mlua::Error::runtime(
+                    "decoration group name must contain only letters, digits, or underscores",
+                ));
+            }
+            let style = buf::parse_style(&style)?;
+            let mut groups = lua
+                .app_data_mut::<DecorationGroups>()
+                .ok_or_else(|| mlua::Error::runtime("decoration group store is unavailable"))?;
+            let group = format!("plugin.{decoration_plugin}.{name}");
+            groups.register(Arc::clone(&decoration_plugin), name, style)?;
+            Ok(group)
+        })?,
+    )?;
 
     let renderer_plugin = Arc::clone(&plugin);
     t.set(

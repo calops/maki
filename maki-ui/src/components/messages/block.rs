@@ -17,7 +17,6 @@ use crate::components::tool_display::{
     spinner_token,
 };
 use crate::components::{DisplayMessage, DisplayRole, ToolStatus};
-use crate::theme;
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
 /// run of placeholder cells.
@@ -387,7 +386,7 @@ fn render_line(
             let mut style = resolve_span_style(&source_span.style);
             for decoration in decorations {
                 if decoration.bytes.start <= range.start && range.end <= decoration.bytes.end {
-                    style = style.patch(theme::style_by_name(&decoration.group));
+                    style = style.patch(resolve_span_style(&decoration.style));
                 }
             }
             let local = range.start - start..range.end - start;
@@ -425,7 +424,10 @@ fn place_tool_body(mut tl: ToolLines, offset: usize) -> ToolBody {
 mod tests {
     use super::*;
     use crate::components::code_view::RenderLimits;
-    use crate::components::{IMAGE_PLACEHOLDER, ToolRole, ToolStatus};
+    use crate::{
+        components::{IMAGE_PLACEHOLDER, ToolRole, ToolStatus},
+        theme,
+    };
     use maki_agent::SnapshotLine;
     use maki_providers::{ImageMediaType, ImageSource};
     use std::sync::Arc;
@@ -528,11 +530,13 @@ mod tests {
                     line: 0,
                     bytes: 1..4,
                     group: "tool".to_owned(),
+                    style: SpanStyle::Named("tool".to_owned()),
                 },
                 Decoration {
                     line: 0,
-                    bytes: 4..5,
+                    bytes: 1..5,
                     group: "error".to_owned(),
+                    style: SpanStyle::Named("error".to_owned()),
                 },
             ],
         }];
@@ -547,12 +551,32 @@ mod tests {
         );
         assert_eq!(
             rendered.lines[0].spans[1].style,
-            theme::style_by_name("tool")
+            theme::style_by_name("tool").patch(theme::style_by_name("error"))
         );
         assert_eq!(
             rendered.lines[0].spans[2].style,
-            theme::style_by_name("error")
+            theme::style_by_name("tool").patch(theme::style_by_name("error"))
         );
+    }
+
+    #[test]
+    fn utf8_wide_decoration_preserves_the_styled_substring_when_wrapped() {
+        let objects = vec![RenderObject::Lines {
+            lines: vec![SnapshotLine::plain("a界b".to_owned())],
+            decorations: vec![Decoration {
+                line: 0,
+                bytes: 1..4,
+                group: "tool".to_owned(),
+                style: SpanStyle::Named("tool".to_owned()),
+            }],
+        }];
+        let rendered = render(&objects).expect("rendered");
+        let mut segment = super::super::segment::Segment::with_lines(rendered.lines, None);
+        segment.set_lua_render(Some(segment.lines().to_vec()), Vec::new(), Vec::new());
+        let mut rows = segment.rows_from(0, 2);
+        let (lines, _) = rows.next_chunk(1).expect("wrapped line");
+        assert_eq!(lines[0].spans[1].content.as_ref(), "界");
+        assert_eq!(lines[0].spans[1].style, theme::style_by_name("tool"));
     }
 
     #[test]
@@ -563,6 +587,7 @@ mod tests {
                 line: 0,
                 bytes: 1..3,
                 group: "tool".to_owned(),
+                style: SpanStyle::Named("tool".to_owned()),
             }],
         }];
         assert!(render(&objects).is_none());

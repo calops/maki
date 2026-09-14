@@ -5544,6 +5544,28 @@ maki.ui.set_status_hint(nil)
 
 ---
 
+### `maki.ui.register_decoration_group()` {#maki-ui-register_decoration_group}
+
+```lua
+maki.ui.register_decoration_group({name}, {style})
+```
+
+Registers a plugin-owned semantic decoration group. The returned decoration group is namespaced as `plugin.<plugin>.<name>` and may be used in a Lines decoration. Built-in groups are `syntax.keyword`, `diff.old`, `diff.new`, `diff.old_sign`, `diff.new_sign`, `diff.line_nr`, `diff.old_line_nr`, `diff.new_line_nr`, and `grep.match`.
+
+**Parameters:**
+
+- `{name}` (`string`) Group suffix containing letters, digits, or underscores.
+- `{style}` (`string|table`) Named or inline span style.
+
+**Example:**
+
+```lua
+maki.ui.register_decoration_group("match", { bold = true })
+-- use group = "plugin.my_plugin.match" in Lines decorations
+```
+
+---
+
 ### `maki.ui.set_block_renderer()` {#maki-ui-set_block_renderer}
 
 ```lua

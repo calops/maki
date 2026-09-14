@@ -2028,6 +2028,7 @@ impl LuaRuntime {
         lua.set_app_data(keymap_writer);
         lua.set_app_data(HintStore::new());
         lua.set_app_data(RendererStore::default());
+        lua.set_app_data(render::DecorationGroups::default());
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
 
