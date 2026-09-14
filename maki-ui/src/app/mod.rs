@@ -37,6 +37,7 @@ use crate::components::keybindings::key;
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
+use crate::components::messages::{Placement, RawOverlay};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::pack_review::{PackReview, PackReviewAction};
 use crate::components::permission_prompt::PermissionPrompt;
@@ -260,6 +261,10 @@ pub struct App {
     pub(crate) image_paste_rx: Vec<flume::Receiver<Result<ImageSource, String>>>,
     storage_writer: Arc<StorageWriter>,
     last_sent: Option<Sent>,
+    /// Placements the last `view` produced, diffed every frame to know which
+    /// rects must be repainted. The event loop forces that repaint.
+    raw: RawOverlay,
+    raw_clear_pending: bool,
     pub(crate) shell: shell::ShellState,
     pub(crate) ui_config: UiConfig,
     pub(crate) permissions: Arc<PermissionManager>,
@@ -359,6 +364,8 @@ impl App {
             image_paste_rx: vec![],
             storage_writer,
             last_sent: None,
+            raw: RawOverlay::default(),
+            raw_clear_pending: false,
             shell: shell::ShellState::default(),
             ui_config,
             permissions,
@@ -1758,7 +1765,7 @@ impl App {
     /// see [`crate::repaint`] for why.
     pub fn tick(&mut self) -> Dirty {
         // `|` never short-circuits: every poller must run on every tick.
-        self.float_mgr.tick()
+        let dirty = self.float_mgr.tick()
             | self.tick_edge_scroll()
             | self.tick_error_expiry()
             | self.poll_image_paste()
@@ -1770,7 +1777,14 @@ impl App {
             | self.usage_modal.poll(&self.usage_slot)
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
-            | Dirty::any(self.chats.iter_mut().map(Chat::tick))
+            | Dirty::any(self.chats.iter_mut().map(Chat::tick));
+        // A changed raw placement owes a full repaint even when no poller
+        // reported anything, so the placeholder cells are re-emitted.
+        if self.raw_clear_pending {
+            dirty | Dirty::YES
+        } else {
+            dirty
+        }
     }
 
     fn tick_file_picker(&mut self) -> Dirty {
@@ -1779,6 +1793,17 @@ impl App {
             self.status_bar.flash(flash);
         }
         dirty
+    }
+
+    /// Raw sequences the last `view` laid out, for the final writer.
+    pub(crate) fn raw_placements(&self) -> &[Placement] {
+        self.raw.placements()
+    }
+
+    /// True when placements changed since the previous frame, so the next
+    /// paint must clear and redraw before writing them.
+    pub(crate) fn raw_clear_pending(&self) -> bool {
+        self.raw_clear_pending
     }
 
     /// What moves with the clock alone; changes that come from arriving data

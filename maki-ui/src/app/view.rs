@@ -47,6 +47,9 @@ impl App {
 
         self.render_background(frame);
         self.render_messages(frame, &layout, render_chat);
+        let placements = self.chats[render_chat].take_raw_placements();
+        let invalidated = self.raw.commit(placements);
+        self.raw_clear_pending = !invalidated.is_empty();
         let cursor = self.render_bottom_panel(frame, &layout);
         self.render_splits(frame, &layout);
         let mut overlay_rect = self.render_picker_overlays(frame, &layout);

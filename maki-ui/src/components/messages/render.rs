@@ -34,6 +34,10 @@ impl RenderCursor {
         self.y >= self.bottom
     }
 
+    pub fn y(&self) -> u16 {
+        self.y
+    }
+
     /// `visible` is false while an overlay covers the transcript. The encoded
     /// protocol is kept either way: releasing it here would re-decode and
     /// re-transmit every image each time a permission prompt opens and closes.

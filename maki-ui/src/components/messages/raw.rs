@@ -1,15 +1,17 @@
 //! Raw terminal sequences emitted by the block renderer.
 //!
 //! A raw object is a constrained final-writer primitive, not arbitrary
-//! terminal text. It owns an explicit `width x height` rectangle; Rust
-//! paints a placeholder there and writes the sequence only after the
-//! frame draw. Rust, not Lua, decides absolute placement and clipping.
+//! terminal text and not an escape hatch. The renderer only describes the
+//! payload and the rectangle it wants; it never writes to the terminal. Rust
+//! paints a placeholder there, decides absolute placement and clipping, and
+//! writes the sequence only after the frame draw.
 //!
 //! A sequence must be cursor-local: it may set graphic rendition, move the
-//! cursor, save or restore it, and carry an APC payload (kitty graphics).
-//! It must not change modes, scroll, touch the alternate screen, or use
-//! OSC, so a plugin cannot hijack terminal state. Anything else is
-//! refused and the block falls back to its Rust rendering.
+//! cursor, and save or restore it. It must not change modes, scroll, touch the
+//! alternate screen, use OSC, or carry a graphics payload (APC/DCS). Persistent
+//! graphics need a Rust-controlled teardown the cell diff cannot provide, so
+//! they are refused until that protocol exists. Anything refused leaves the
+//! block on its Rust rendering.
 
 use ratatui::layout::Rect;
 
@@ -22,6 +24,8 @@ pub(crate) enum RawViolation {
     Osc,
     PrivateMode,
     ScreenControl,
+    /// A graphics payload (APC/DCS), refused until there is a teardown.
+    Graphics,
 }
 
 /// A raw sequence and the rectangle it occupies.
@@ -31,56 +35,40 @@ pub(crate) struct Placement {
     pub seq: String,
 }
 
-/// Rects the final writer must repaint because a placement moved,
-/// changed, or disappeared. Repainting is required: a cell diff would
-/// believe the placeholder cells are still on screen and leave the old
-/// sequence there.
+/// The last frame's placements, used to answer which rects the final writer
+/// must repaint because a placement moved, changed, or disappeared.
+/// Repainting is required: a cell diff would believe the placeholder cells
+/// are still on screen and leave the old sequence there.
 #[derive(Default)]
 pub(crate) struct RawOverlay {
-    current: Vec<Placement>,
-    previous: Vec<Placement>,
+    placements: Vec<Placement>,
 }
 
 impl RawOverlay {
-    /// Starts a frame, rotating last frame's placements into the set the
-    /// next [`Self::invalidate`] compares against.
-    pub(crate) fn begin(&mut self) {
-        self.previous = std::mem::take(&mut self.current);
-    }
-
-    /// Records a placement clipped to `viewport`.
-    pub(crate) fn place(
-        &mut self,
-        rect: Rect,
-        seq: &str,
-        viewport: Rect,
-    ) -> Result<(), RawViolation> {
-        validate(seq)?;
-        if let Some(rect) = clip(rect, viewport) {
-            self.current.push(Placement {
-                rect,
-                seq: seq.to_owned(),
-            });
-        }
-        Ok(())
-    }
-
-    /// Rects to force-repaint this frame: every placement that left, moved,
-    /// changed, or scrolled away.
-    pub(crate) fn invalidate(&self) -> Vec<Rect> {
+    /// Records this frame's placements and answers the rects that differ
+    /// from the previous frame: old rects that left or changed, plus new
+    /// rects that appeared or changed. The caller force-repaints them,
+    /// because a cell diff would keep the stale sequence on screen.
+    pub(crate) fn commit(&mut self, current: Vec<Placement>) -> Vec<Rect> {
         let mut rects: Vec<Rect> = self
-            .previous
+            .placements
             .iter()
-            .filter(|old| !self.current.contains(old))
+            .filter(|old| !current.contains(old))
             .map(|old| old.rect)
             .collect();
         rects.extend(
-            self.current
+            current
                 .iter()
-                .filter(|new| !self.previous.contains(new))
+                .filter(|new| !self.placements.contains(new))
                 .map(|new| new.rect),
         );
+        self.placements = current;
         rects
+    }
+
+    /// This frame's placements, in the order the panel recorded them.
+    pub(crate) fn placements(&self) -> &[Placement] {
+        &self.placements
     }
 }
 
@@ -115,9 +103,9 @@ fn escape(bytes: &[u8], i: usize) -> Result<usize, RawViolation> {
         b'[' => csi(bytes, i + 2),
         // DECSC / DECRC.
         b'7' | b'8' => Ok(i + 2),
-        // APC, the introducer kitty graphics use.
-        b'_' => apc(bytes, i + 2),
         b']' => Err(RawViolation::Osc),
+        // APC and DCS carry graphics that outlive the frame.
+        b'_' | b'P' => Err(RawViolation::Graphics),
         _ => Err(RawViolation::Unfinished),
     }
 }
@@ -148,23 +136,6 @@ fn csi(bytes: &[u8], mut i: usize) -> Result<usize, RawViolation> {
     Err(RawViolation::Unfinished)
 }
 
-/// Walks an APC payload to its String Terminator.
-fn apc(bytes: &[u8], mut i: usize) -> Result<usize, RawViolation> {
-    while let Some(&byte) = bytes.get(i) {
-        match byte {
-            0x1b => {
-                return match bytes.get(i + 1) {
-                    Some(b'\\') => Ok(i + 2),
-                    _ => Err(RawViolation::Unfinished),
-                };
-            }
-            byte if byte < 0x20 => return Err(RawViolation::Control),
-            _ => i += 1,
-        }
-    }
-    Err(RawViolation::Unfinished)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +146,6 @@ mod tests {
     #[test_case("\u{1b}[2A" ; "cursor_up")]
     #[test_case("\u{1b}7\u{1b}8" ; "save_restore")]
     #[test_case("\u{1b}[s\u{1b}[u" ; "scosc_scorc")]
-    #[test_case("\u{1b}_Ga=T,f=100;\u{1b}\\" ; "kitty_apc")]
     fn accepted(seq: &str) {
         assert_eq!(validate(seq), Ok(()));
     }
@@ -190,7 +160,9 @@ mod tests {
     #[test_case("\u{1b}c" ; "reset")]
     #[test_case("\u{1b}[31" ; "unfinished_csi")]
     #[test_case("\u{1b}" ; "lone_escape")]
+    #[test_case("\u{1b}_Ga=T,f=100;\u{1b}\\" ; "kitty_graphics_deferred")]
     #[test_case("\u{1b}_Ga=T" ; "unterminated_apc")]
+    #[test_case("\u{1b}Pq" ; "dcs_graphics_deferred")]
     #[test_case("\u{7}" ; "bare_control")]
     fn refused(seq: &str) {
         assert!(validate(seq).is_err());
@@ -211,72 +183,53 @@ mod tests {
         assert_eq!(clip(Rect::new(200, 12, 4, 2), viewport), None);
     }
 
+    const SGR_RED: &str = "\u{1b}[31m";
+    const SGR_GREEN: &str = "\u{1b}[32m";
+
+    fn placement(rect: Rect, seq: &str, viewport: Rect) -> Placement {
+        Placement {
+            rect: clip(rect, viewport).unwrap(),
+            seq: seq.to_owned(),
+        }
+    }
+
     #[test]
     fn unchanged_placement_needs_no_invalidation() {
         let mut overlay = RawOverlay::default();
         let viewport = Rect::new(0, 0, 80, 24);
         let rect = Rect::new(1, 1, 2, 1);
-        overlay.begin();
-        overlay.place(rect, "\u{1b}[31m", viewport).unwrap();
-        overlay.begin();
-        overlay.place(rect, "\u{1b}[31m", viewport).unwrap();
-        assert!(overlay.invalidate().is_empty());
+        overlay.commit(vec![placement(rect, SGR_RED, viewport)]);
+        assert!(
+            overlay
+                .commit(vec![placement(rect, SGR_RED, viewport)])
+                .is_empty()
+        );
     }
 
     #[test]
     fn moving_or_changing_placement_invalidates_both_rects() {
         let mut overlay = RawOverlay::default();
         let viewport = Rect::new(0, 0, 80, 24);
-        overlay.begin();
-        overlay
-            .place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", viewport)
-            .unwrap();
-        overlay.begin();
-        overlay
-            .place(Rect::new(1, 5, 2, 1), "\u{1b}[32m", viewport)
-            .unwrap();
-        let rects = overlay.invalidate();
+        overlay.commit(vec![placement(Rect::new(1, 1, 2, 1), SGR_RED, viewport)]);
+        let rects = overlay.commit(vec![placement(Rect::new(1, 5, 2, 1), SGR_GREEN, viewport)]);
         assert!(rects.contains(&Rect::new(1, 1, 2, 1)));
         assert!(rects.contains(&Rect::new(1, 5, 2, 1)));
+    }
+
+    #[test]
+    fn placements_expose_the_current_frame() {
+        let mut overlay = RawOverlay::default();
+        let viewport = Rect::new(0, 0, 80, 24);
+        let first = placement(Rect::new(1, 1, 2, 1), SGR_RED, viewport);
+        overlay.commit(vec![first.clone()]);
+        assert_eq!(overlay.placements(), std::slice::from_ref(&first));
     }
 
     #[test]
     fn vanished_placement_invalidates_its_rect() {
         let mut overlay = RawOverlay::default();
         let viewport = Rect::new(0, 0, 80, 24);
-        overlay.begin();
-        overlay
-            .place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", viewport)
-            .unwrap();
-        overlay.begin();
-        assert_eq!(overlay.invalidate(), vec![Rect::new(1, 1, 2, 1)]);
-    }
-
-    #[test]
-    fn scrolling_away_clips_the_placement_out() {
-        let mut overlay = RawOverlay::default();
-        overlay.begin();
-        overlay
-            .place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", Rect::new(0, 0, 80, 24))
-            .unwrap();
-        overlay.begin();
-        overlay
-            .place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", Rect::new(0, 5, 80, 24))
-            .unwrap();
-        assert_eq!(overlay.invalidate(), vec![Rect::new(1, 1, 2, 1)]);
-    }
-
-    #[test]
-    fn refused_sequence_leaves_no_placement() {
-        let mut overlay = RawOverlay::default();
-        assert_eq!(
-            overlay.place(
-                Rect::new(0, 0, 1, 1),
-                "\u{1b}]0;x\u{7}",
-                Rect::new(0, 0, 80, 24)
-            ),
-            Err(RawViolation::Osc)
-        );
-        assert!(overlay.invalidate().is_empty());
+        overlay.commit(vec![placement(Rect::new(1, 1, 2, 1), SGR_RED, viewport)]);
+        assert_eq!(overlay.commit(Vec::new()), vec![Rect::new(1, 1, 2, 1)]);
     }
 }

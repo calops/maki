@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::tasks::{TaskOutcome, TaskStatus};
-use crate::components::messages::{MessagesPanel, PromptProgress, ScrollPos};
+use crate::components::messages::{MessagesPanel, Placement, PromptProgress, ScrollPos};
 use crate::components::tool_display::append_annotation;
 use crate::components::{DisplayMessage, DisplayRole, ToolRole, ToolStatus};
 use crate::markdown::truncate_output;
@@ -282,6 +282,10 @@ impl Chat {
 
     pub fn set_render_mode(&mut self, mode: Arc<str>) {
         self.messages_panel.set_render_mode(mode);
+    }
+
+    pub(crate) fn take_raw_placements(&mut self) -> Vec<Placement> {
+        self.messages_panel.take_raw_placements()
     }
 
     pub fn tick(&mut self) -> Dirty {

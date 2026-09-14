@@ -5276,7 +5276,7 @@ maki.ui.set_status_hint(nil)
 maki.ui.set_block_renderer({fn})
 ```
 
-Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), or `{{raw = "...", width = n, height = n}}` for raw terminal sequences. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
+Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), or `{{raw = "...", width = n, height = n}}` to request a raw sequence in a reserved rectangle. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
 
 **Parameters:**
 

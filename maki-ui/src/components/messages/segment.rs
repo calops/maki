@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::super::code_view::SectionFlags;
 use super::super::tool_display::{HighlightRequest, ToolLines};
+use super::block::RawSpan;
 use ratatui::text::{Line, Span};
 use std::cell::Cell;
 use std::mem;
@@ -59,6 +60,9 @@ pub(super) struct Segment {
     /// stays consistent with what is painted. `set_lines` clears them,
     /// because a Rust rebuild supersedes the render.
     lua_lines: Option<Vec<Line<'static>>>,
+    /// Raw sequences the Lua renderer placed inside `lua_lines`, at the
+    /// source row each begins on. Cleared with `lua_lines`.
+    raw: Vec<RawSpan>,
     /// Content revision, bumped whenever a Rust rebuild replaces the
     /// lines. Render requests are keyed by it.
     revision: u64,
@@ -119,17 +123,24 @@ impl Segment {
     pub fn set_lines(&mut self, lines: Vec<Line<'static>>) {
         self.lines = lines;
         self.lua_lines = None;
+        self.raw.clear();
         self.revision += 1;
         self.stale = false;
         self.invalidate_height();
     }
 
-    /// Replaces the drawn lines with the block renderer's output. `None`
-    /// returns to the Rust-built lines. Does not bump the revision: this
-    /// is the render result for the current one, not a content change.
-    pub fn set_lua_lines(&mut self, lines: Option<Vec<Line<'static>>>) {
+    /// Replaces the drawn lines and raw placements with the block
+    /// renderer's output. `None` returns to the Rust-built lines. Does not
+    /// bump the revision: this is the render result for the current one,
+    /// not a content change.
+    pub fn set_lua_render(&mut self, lines: Option<Vec<Line<'static>>>, raw: Vec<RawSpan>) {
         self.lua_lines = lines;
+        self.raw = raw;
         self.invalidate_height();
+    }
+
+    pub fn raw(&self) -> &[RawSpan] {
+        &self.raw
     }
 
     pub fn revision(&self) -> u64 {
@@ -570,18 +581,36 @@ mod tests {
         );
     }
 
+    fn raw_span() -> RawSpan {
+        RawSpan {
+            row: 0,
+            seq: "\u{1b}[31m".to_owned(),
+            width: 1,
+            height: 1,
+        }
+    }
+
     #[test]
-    fn lua_lines_stand_in_for_rusted_lines_without_bumping_revision() {
+    fn lua_render_stands_in_for_rusted_lines_without_bumping_revision() {
         let mut seg = Segment::with_lines(vec![Line::raw("a"), Line::raw("b")], Some(0));
         assert_eq!(seg.lines().len(), 2);
         let revision = seg.revision();
-        seg.set_lua_lines(Some(vec![Line::raw("only")]));
+        seg.set_lua_render(Some(vec![Line::raw("only")]), vec![raw_span()]);
         assert_eq!(seg.lines().len(), 1);
         assert!(seg.has_lua_lines());
+        assert_eq!(seg.raw().len(), 1);
         assert_eq!(seg.revision(), revision);
         seg.set_lines(vec![Line::raw("rust")]);
         assert_eq!(seg.lines().len(), 1);
         assert!(!seg.has_lua_lines());
         assert_eq!(seg.revision(), revision + 1);
+    }
+
+    #[test]
+    fn set_lines_clears_raw_placements() {
+        let mut seg = Segment::with_lines(vec![Line::raw("a")], Some(0));
+        seg.set_lua_render(Some(vec![Line::raw("b")]), vec![raw_span()]);
+        seg.set_lines(vec![Line::raw("c")]);
+        assert!(seg.raw().is_empty());
     }
 }

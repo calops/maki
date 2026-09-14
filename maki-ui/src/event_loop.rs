@@ -58,6 +58,7 @@ use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, Status};
 use crate::input::InputReader;
+use crate::raw_writer;
 use crate::repaint::{Dirty, IDLE_POLL};
 
 use crate::storage_writer::StorageWriter;
@@ -468,6 +469,9 @@ pub(crate) struct EventLoop<'t> {
     /// without this a second `/packupdate` would race the first over the same
     /// clones and locks.
     pack_running: bool,
+    /// Set when a raw write fails, so the session stops emitting raw bytes
+    /// instead of retrying a terminal that cannot take them.
+    raw_disabled: bool,
     _model_fetch_task: smol::Task<()>,
 }
 
@@ -693,6 +697,7 @@ impl<'t> EventLoop<'t> {
             pack_tx,
             pack_rx,
             pack_running: false,
+            raw_disabled: false,
             _model_fetch_task: bg.task,
         })
     }
@@ -712,12 +717,28 @@ impl<'t> EventLoop<'t> {
     /// and the hide that goes with it, so a widget that does ask for one
     /// cannot bring the block cursor back.
     fn paint(&mut self) -> Result<()> {
+        if !self.raw_disabled && self.sessions[self.focused].app.raw_clear_pending() {
+            // Resets ratatui's buffers so the next draw re-emits the cells a
+            // raw sequence overwrote, then we write it again over them.
+            self.terminal.clear()?;
+        }
         let app = &mut self.sessions[self.focused].app;
         let mut cursor = None;
         self.terminal.draw(|f| {
             cursor = app.view(f);
             color_compat::downgrade_if_needed(f.buffer_mut());
         })?;
+        if !self.raw_disabled {
+            let placements = self.sessions[self.focused].app.raw_placements();
+            if !placements.is_empty() {
+                let result = raw_writer::write_sequences(self.terminal.backend_mut(), placements)
+                    .and_then(|()| self.terminal.backend_mut().flush());
+                if let Err(error) = result {
+                    warn!(%error, "raw sequence write failed; disabling raw for this session");
+                    self.raw_disabled = true;
+                }
+            }
+        }
         if let Some(pos) = cursor {
             self.terminal.hide_cursor()?;
             self.terminal.set_cursor_position(pos)?;

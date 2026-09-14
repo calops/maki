@@ -43,8 +43,13 @@ pub struct RenderCtx {
 }
 
 /// One in-memory render object. `Lines` reuses the span IR buffers and
-/// floats already speak. `Raw` is a terminal escape sequence the final
-/// renderer flushes at the current position, bypassing cell diffing.
+/// floats already speak.
+///
+/// `Raw` is a narrowly validated final-writer payload, not a general escape
+/// hatch: Lua only describes the sequence and the rectangle it wants. Rust
+/// alone validates it, decides absolute placement and clipping, emits it after
+/// the frame draw, and restores terminal state around it. Lua never writes to
+/// the terminal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderObject {
     Lines(Vec<SnapshotLine>),
@@ -247,7 +252,7 @@ fn as_raw(table: &Table) -> Option<LuaResult<RenderObject>> {
 pub(crate) const set_block_renderer__doc: FnDoc = FnDoc {
     name: "set_block_renderer",
     args: "{fn}",
-    desc: "Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), or `{{raw = \"...\", width = n, height = n}}` for raw terminal sequences. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.",
+    desc: "Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), or `{{raw = \"...\", width = n, height = n}}` to request a raw sequence in a reserved rectangle. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.",
     params: &[ParamDoc {
         name: "{fn}",
         ty: "function|nil",

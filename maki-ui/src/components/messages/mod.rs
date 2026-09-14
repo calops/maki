@@ -1,6 +1,5 @@
 mod block;
 mod block_render;
-#[allow(dead_code)]
 mod raw;
 mod render;
 mod scroll;
@@ -12,6 +11,8 @@ mod tests;
 pub use self::scroll::ScrollPos;
 
 use self::block_render::{BlockId, BlockRenderCache, RenderKey};
+use self::raw::clip;
+pub(crate) use self::raw::{Placement, RawOverlay};
 use self::render::RenderCursor;
 use self::scroll::{Layout, TailPart};
 use self::segment::{Segment, SegmentCache};
@@ -82,6 +83,9 @@ pub struct MessagesPanel {
     cache: SegmentCache,
     /// Renders of transcript blocks produced by Lua, applied in `tick`.
     block_render: BlockRenderCache,
+    /// Raw sequences the last `view` laid out, in draw order. The final
+    /// writer emits them after the frame.
+    raw_placements: Vec<Placement>,
     /// Build or plan, part of the render key.
     render_mode: Arc<str>,
     /// The streaming tail the last `view` drew, in the order it drew it. Lets
@@ -146,6 +150,7 @@ impl MessagesPanel {
             viewport_width: crossterm::terminal::size().map_or(80, |(w, _)| w.saturating_sub(1)),
             cache: SegmentCache::new(),
             block_render: BlockRenderCache::default(),
+            raw_placements: Vec::new(),
             render_mode: Arc::from("build"),
             tail: Vec::new(),
             hl_worker: RenderWorker::new(),
@@ -693,6 +698,12 @@ impl MessagesPanel {
         self.render_mode = mode;
     }
 
+    /// The raw placements this frame's `view` laid out. Taken rather than
+    /// borrowed so the caller can hold them across the frame draw.
+    pub(crate) fn take_raw_placements(&mut self) -> Vec<Placement> {
+        std::mem::take(&mut self.raw_placements)
+    }
+
     pub fn handle_click(&mut self, row: u16, area: Rect) -> bool {
         if area.height == 0 {
             return false;
@@ -849,11 +860,13 @@ impl MessagesPanel {
         let changed = block_render.poll();
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
             let id = BlockId::new(index as u64);
-            let lines = block_render
+            let rendered = block_render
                 .objects(id, segment.revision(), &key)
-                .and_then(block::lines_for);
-            if lines.is_some() || segment.has_lua_lines() {
-                segment.set_lua_lines(lines);
+                .and_then(block::render);
+            match rendered {
+                Some((lines, raw)) => segment.set_lua_render(Some(lines), raw),
+                None if segment.has_lua_lines() => segment.set_lua_render(None, Vec::new()),
+                None => {}
             }
         }
         Dirty::from(changed)
@@ -928,6 +941,7 @@ impl MessagesPanel {
         has_selection: bool,
         images_visible: bool,
     ) {
+        self.raw_placements.clear();
         self.viewport_height = area.height;
         let width = area.width.saturating_sub(1);
         let theme_gen = theme::generation();
@@ -1001,6 +1015,30 @@ impl MessagesPanel {
             let h = seg.text_height(width);
             let highlight = self.highlight_segment == Some(i);
             let style = seg.tool_id.as_ref().map(|_| theme::current().tool_bg);
+            let segment_top_y = cursor.y();
+            if !seg.raw().is_empty() {
+                let skipped = if i == self.scroll.seg {
+                    self.scroll.row.min(h)
+                } else {
+                    0
+                };
+                let mut measure = wrap::Measure::new(width);
+                for span in seg.raw() {
+                    let display_row = seg.lines()[..span.row]
+                        .iter()
+                        .fold(0u16, |rows, line| rows.saturating_add(measure.rows(line)));
+                    let screen_y = segment_top_y
+                        .saturating_sub(skipped)
+                        .saturating_add(display_row);
+                    let rect = Rect::new(area.x, screen_y, span.width.min(width), span.height);
+                    if let Some(rect) = clip(rect, viewport) {
+                        self.raw_placements.push(Placement {
+                            rect,
+                            seq: span.seq.clone(),
+                        });
+                    }
+                }
+            }
             cursor.render(seg.lines(), h, style, highlight, frame);
             for image in &mut seg.images {
                 cursor.render_image(image, self.image_picker.as_ref(), images_visible, frame);
