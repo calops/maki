@@ -648,7 +648,7 @@ fn adjust_scroll(
 /// animation frame, so plugins animate without redrawing (floats already
 /// repaint every tick while open). `"spinner:<style>"` takes `<style>`, so
 /// rows can keep the glyph on e.g. their selection background.
-fn snapshot_to_line(sline: &SnapshotLine) -> Line<'_> {
+pub(crate) fn snapshot_to_line(sline: &SnapshotLine) -> Line<'static> {
     Line::from(
         sline
             .spans

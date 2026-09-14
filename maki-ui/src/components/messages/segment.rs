@@ -54,6 +54,14 @@ impl HighlightKey {
 #[derive(Default)]
 pub(super) struct Segment {
     lines: Vec<Line<'static>>,
+    /// Lines the Lua block renderer produced for this segment. They stand
+    /// in for `lines` for everything that measures or draws, so layout
+    /// stays consistent with what is painted. `set_lines` clears them,
+    /// because a Rust rebuild supersedes the render.
+    lua_lines: Option<Vec<Line<'static>>>,
+    /// Content revision, bumped whenever a Rust rebuild replaces the
+    /// lines. Render requests are keyed by it.
+    revision: u64,
     pub images: Vec<InlineImage>,
     pub tool_id: Option<String>,
     /// Backlink to `self.messages`, set only by `with_lines`. A click on a
@@ -105,13 +113,31 @@ impl Segment {
     }
 
     pub fn lines(&self) -> &[Line<'static>] {
-        &self.lines
+        self.lua_lines.as_deref().unwrap_or(&self.lines)
     }
 
     pub fn set_lines(&mut self, lines: Vec<Line<'static>>) {
         self.lines = lines;
+        self.lua_lines = None;
+        self.revision += 1;
         self.stale = false;
         self.invalidate_height();
+    }
+
+    /// Replaces the drawn lines with the block renderer's output. `None`
+    /// returns to the Rust-built lines. Does not bump the revision: this
+    /// is the render result for the current one, not a content change.
+    pub fn set_lua_lines(&mut self, lines: Option<Vec<Line<'static>>>) {
+        self.lua_lines = lines;
+        self.invalidate_height();
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn has_lua_lines(&self) -> bool {
+        self.lua_lines.is_some()
     }
 
     /// Rows the lines take at `width`, measured at that width whatever
@@ -157,7 +183,7 @@ impl Segment {
         {
             return c.height;
         }
-        let h = wrap::total_rows(&self.lines, width);
+        let h = wrap::total_rows(self.lines(), width);
         self.cached_height.set(Some(CachedHeight {
             at_width: width,
             height: h,
@@ -173,7 +199,7 @@ impl Segment {
     /// A cursor parked on the source line that covers display row `start_row`.
     pub fn rows_from(&self, start_row: u16, width: u16) -> RowWalk<'_> {
         let mut walk = RowWalk {
-            lines: &self.lines,
+            lines: self.lines(),
             measure: wrap::Measure::new(width),
             next_line: 0,
             row: 0,
@@ -542,5 +568,20 @@ mod tests {
             vec![(0, 0), (5usize.saturating_add_signed(delta), 1)],
             "positions before the splice stay, after it shift by the delta"
         );
+    }
+
+    #[test]
+    fn lua_lines_stand_in_for_rusted_lines_without_bumping_revision() {
+        let mut seg = Segment::with_lines(vec![Line::raw("a"), Line::raw("b")], Some(0));
+        assert_eq!(seg.lines().len(), 2);
+        let revision = seg.revision();
+        seg.set_lua_lines(Some(vec![Line::raw("only")]));
+        assert_eq!(seg.lines().len(), 1);
+        assert!(seg.has_lua_lines());
+        assert_eq!(seg.revision(), revision);
+        seg.set_lines(vec![Line::raw("rust")]);
+        assert_eq!(seg.lines().len(), 1);
+        assert!(!seg.has_lua_lines());
+        assert_eq!(seg.revision(), revision + 1);
     }
 }

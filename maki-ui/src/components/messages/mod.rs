@@ -1,3 +1,7 @@
+mod block_render;
+mod block;
+#[allow(dead_code)]
+mod raw;
 mod render;
 mod scroll;
 mod segment;
@@ -7,6 +11,7 @@ mod tests;
 
 pub use self::scroll::ScrollPos;
 
+use self::block_render::{BlockId, BlockRenderCache, RenderKey};
 use self::render::RenderCursor;
 use self::scroll::{Layout, TailPart};
 use self::segment::{Segment, SegmentCache};
@@ -75,6 +80,10 @@ pub struct MessagesPanel {
     viewport_height: u16,
     viewport_width: u16,
     cache: SegmentCache,
+    /// Renders of transcript blocks produced by Lua, applied in `tick`.
+    block_render: BlockRenderCache,
+    /// Build or plan, part of the render key.
+    render_mode: Arc<str>,
     /// The streaming tail the last `view` drew, in the order it drew it. Lets
     /// the row walk and clicks address the tail between frames.
     tail: Vec<(TailPart, u16)>,
@@ -136,6 +145,8 @@ impl MessagesPanel {
             viewport_height: 24,
             viewport_width: crossterm::terminal::size().map_or(80, |(w, _)| w.saturating_sub(1)),
             cache: SegmentCache::new(),
+            block_render: BlockRenderCache::default(),
+            render_mode: Arc::from("build"),
             tail: Vec::new(),
             hl_worker: RenderWorker::new(),
             image_picker: terminal_image::picker(ui_config.inline_images),
@@ -209,6 +220,7 @@ impl MessagesPanel {
         };
         *slot = msg;
         self.cache.clear();
+        self.block_render = BlockRenderCache::default();
     }
 
     pub fn load_messages(&mut self, mut msgs: Vec<DisplayMessage>) {
@@ -221,6 +233,7 @@ impl MessagesPanel {
         }
         self.messages = msgs;
         self.cache.clear();
+        self.block_render = BlockRenderCache::default();
         self.expanded_tools.clear();
         self.lua_clicks.clear();
         self.live_bufs.clear();
@@ -676,6 +689,10 @@ impl MessagesPanel {
         self.accent.set(color);
     }
 
+    pub fn set_render_mode(&mut self, mode: Arc<str>) {
+        self.render_mode = mode;
+    }
+
     pub fn handle_click(&mut self, row: u16, area: Rect) -> bool {
         if area.height == 0 {
             return false;
@@ -788,10 +805,58 @@ impl MessagesPanel {
     /// them fed.
     pub fn tick(&mut self) -> Dirty {
         let mut dirty = self.drain_highlights() | self.poll_live_bufs() | self.refresh_images();
+        dirty |= self.tick_block_renders();
         if self.show_idle_splash() {
             dirty |= self.idle_splash.poll_update(update::latest_version());
         }
         dirty
+    }
+
+    /// Asks the block renderer for the eligible blocks and applies what came
+    /// back. Runs outside `view`, so painting only ever reads lines a segment
+    /// already holds. Tool and thinking blocks keep their Rust rendering until
+    /// their interactions move over too.
+    fn tick_block_renders(&mut self) -> Dirty {
+        let key = RenderKey {
+            width: self.viewport_width,
+            theme_gen: theme::generation(),
+            mode: Arc::clone(&self.render_mode),
+            generation: maki_lua::renderer_generation(),
+        };
+        let Self {
+            messages,
+            cache,
+            block_render,
+            lua_event_handle,
+            ..
+        } = self;
+        for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
+            let Some(message) = segment.msg_index.and_then(|i| messages.get(i)) else {
+                continue;
+            };
+            if !block::renderable(message) {
+                continue;
+            }
+            let id = BlockId::new(index as u64);
+            let revision = segment.revision();
+            if block_render.needs(id, revision, &key) {
+                let block = block::project(message);
+                block_render.request(id, revision, block, key.clone(), |block, ctx| {
+                    lua_event_handle.request_render_block(block, ctx)
+                });
+            }
+        }
+        let changed = block_render.poll();
+        for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
+            let id = BlockId::new(index as u64);
+            let lines = block_render
+                .objects(id, segment.revision(), &key)
+                .and_then(block::lines_for);
+            if lines.is_some() || segment.has_lua_lines() {
+                segment.set_lua_lines(lines);
+            }
+        }
+        Dirty::from(changed)
     }
 
     pub fn cadence(&self) -> Cadence {
@@ -806,6 +871,7 @@ impl MessagesPanel {
             // A running tool draws a spinner. Its output arriving is data, and
             // `tick` reports that separately.
             Cadence::when(self.in_progress_count() > 0, Cadence::SPINNER),
+            Cadence::when(self.block_render.inflight(), Cadence::PENDING),
             Cadence::when(smooth, Cadence::SMOOTH),
             Cadence::when(self.show_idle_splash(), self.idle_splash.cadence()),
         ])

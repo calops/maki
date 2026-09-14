@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::components::Overlay;
@@ -149,6 +150,11 @@ impl App {
     fn render_messages(&mut self, frame: &mut Frame, layout: &ViewLayout, render_chat: usize) {
         let accent = self.effective_mode_color();
         self.chats[render_chat].set_accent(accent);
+        let mode = match self.state.mode {
+            Mode::Plan => "plan",
+            Mode::Build => "build",
+        };
+        self.chats[render_chat].set_render_mode(Arc::from(mode));
         let images_visible = !self.any_overlay_open();
         self.chats[render_chat].view(
             frame,

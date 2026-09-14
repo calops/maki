@@ -280,6 +280,10 @@ impl Chat {
         self.messages_panel.set_accent(color);
     }
 
+    pub fn set_render_mode(&mut self, mode: Arc<str>) {
+        self.messages_panel.set_render_mode(mode);
+    }
+
     pub fn tick(&mut self) -> Dirty {
         self.messages_panel.tick()
     }
