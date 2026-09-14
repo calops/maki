@@ -70,6 +70,21 @@ impl SegmentColor {
     }
 }
 
+/// A resolved UI style the host publishes for plugin Lua, which cannot see the
+/// ratatui theme. Mirrors the modifiers a plugin span style table accepts, so a
+/// returned table round-trips through `SpanStyle::Inline`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiStyle {
+    pub fg: Option<SegmentColor>,
+    pub bg: Option<SegmentColor>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub dim: bool,
+    pub strikethrough: bool,
+    pub reversed: bool,
+}
+
 /// Rejects the `+4` and `-0` that `u8::from_str` would otherwise accept, and
 /// any casing or separator sloppiness, so a spelling either resolves exactly
 /// or not at all.
@@ -264,6 +279,26 @@ pub fn theme_color(name: &str) -> Option<SegmentColor> {
         b: channel("b")?,
         a: channel("a")?,
     }))
+}
+
+static UI_STYLES: OnceLock<RwLock<HashMap<String, UiStyle>>> = OnceLock::new();
+
+fn ui_styles_lock() -> &'static RwLock<HashMap<String, UiStyle>> {
+    UI_STYLES.get_or_init(RwLock::default)
+}
+
+pub fn set_ui_styles(styles: HashMap<String, UiStyle>) {
+    *ui_styles_lock().write().unwrap_or_else(|e| e.into_inner()) = styles;
+}
+
+/// The resolved style the host published for `name`, if any. Unlike
+/// [`theme_color`], this carries modifiers and only knows the host's UI names.
+pub fn ui_style(name: &str) -> Option<UiStyle> {
+    ui_styles_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .copied()
 }
 
 pub fn syntax_set() -> &'static SyntaxSet {

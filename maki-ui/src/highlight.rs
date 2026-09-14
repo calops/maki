@@ -27,6 +27,12 @@ pub(crate) fn refresh_syntax_theme() {
         .filter_map(|(name, color)| Some((name.to_owned(), theme::segment_color(color?))))
         .collect(),
     );
+    maki_highlight::set_ui_styles(
+        theme::named_styles()
+            .into_iter()
+            .map(|(name, style)| (name.to_owned(), style))
+            .collect(),
+    );
 }
 
 pub fn highlight_line(hl: &mut maki_highlight::Highlighter, text: &str) -> Vec<Span<'static>> {

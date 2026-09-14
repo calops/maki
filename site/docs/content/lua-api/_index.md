@@ -4955,6 +4955,75 @@ end
 
 ---
 
+### `maki.ui.theme_style()` {#maki-ui-theme_style}
+
+```lua
+maki.ui.theme_style({name})
+```
+
+Returns a named theme style as a style table you can pass to a span and
+then adjust, e.g. to add a modifier the theme does not set.
+
+The name is the same one a span style string takes, such as `"tool_success"`
+or `"accent"`. The table holds the resolved `fg`/`bg` and only the modifiers
+that are on (`bold`, `italic`, `underline`, `dim`, `strikethrough`,
+`reversed`), so you can set or clear any before returning it. Unlike
+`theme_color`, it keeps modifiers and knows the host's UI name set.
+
+**Parameters:**
+
+- `{name}` (`string`) A named theme style, e.g. "tool_success".
+
+**Returns:** (`table|nil`) A span style table, or nil when the name is unknown.
+
+**Example:**
+
+```lua
+local style = maki.ui.theme_style("tool_success")
+if style then
+  style.bold = true
+end
+buf:line({ { "all done", style } })
+```
+
+---
+
+### `maki.ui.transcript_markdown()` {#maki-ui-transcript_markdown}
+
+```lua
+maki.ui.transcript_markdown({text}, {width}, {opts?})
+```
+
+Renders Markdown exactly as the transcript does and returns its styled
+lines, so a block renderer can reproduce what the transcript would draw
+without a second implementation.
+
+`opts.prefix` shares the first line for inline blocks (paragraph, list,
+heading) and gets a leader line of its own for standalone blocks (code,
+table, horizontal rule), matching the transcript. `opts.text_style` and
+`opts.prefix_style` take the theme styles for the role line. Returns nil
+when the host has no native renderer (headless).
+
+**Parameters:**
+
+- `{text}` (`string`) Markdown source.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
+- `{opts?}` (`table|nil`) `{prefix?, text_style?, prefix_style?}`.
+
+**Returns:** (`table|nil`) Lines, each a span list, or nil when unavailable.
+
+**Example:**
+
+```lua
+return maki.ui.transcript_markdown(block.text, ctx.width, {
+  prefix = "maki> ",
+  text_style = maki.ui.theme_style("assistant"),
+  prefix_style = maki.ui.theme_style("assistant_prefix"),
+})
+```
+
+---
+
 ### `maki.ui.highlight()` {#maki-ui-highlight}
 
 ```lua

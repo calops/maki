@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use maki_agent::types::{DefaultColor, InlineStyle, SpanColor};
 use maki_agent::{SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
-use maki_highlight::SegmentColor;
+use maki_highlight::{SegmentColor, UiStyle};
 use maki_lua_macro::{lua_class, lua_fn};
 use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 
@@ -418,7 +418,7 @@ fn parse_span(val: &LuaValue) -> LuaResult<SnapshotSpan> {
     Ok(SnapshotSpan { text, style })
 }
 
-fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
+pub(crate) fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
     match val {
         LuaValue::Nil => Ok(SpanStyle::Default),
         v if v.is_null() => Ok(SpanStyle::Default),
@@ -488,6 +488,30 @@ fn inline_to_lua(lua: &Lua, inline: &InlineStyle) -> LuaResult<Table> {
         }
     }
     Ok(tbl)
+}
+
+/// A host-published UI style in the shape a span style table takes, so
+/// `maki.ui.theme_style` and the span reader cannot drift.
+pub(crate) fn ui_style_to_lua(lua: &Lua, style: &UiStyle) -> LuaResult<Table> {
+    let inline = InlineStyle {
+        fg: style.fg.map(span_color_from_segment),
+        bg: style.bg.map(span_color_from_segment),
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        dim: style.dim,
+        strikethrough: style.strikethrough,
+        reversed: style.reversed,
+    };
+    inline_to_lua(lua, &inline)
+}
+
+fn span_color_from_segment(c: SegmentColor) -> SpanColor {
+    match c {
+        SegmentColor::Rgb(rgb) => SpanColor::Rgb(rgb),
+        SegmentColor::Ansi(i) => SpanColor::Ansi(i),
+        SegmentColor::Default => SpanColor::Default(DefaultColor::Default),
+    }
 }
 
 /// Plugins speak the same `#rrggbb | index | name | default` grammar as

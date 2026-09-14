@@ -17,6 +17,7 @@ pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::pack::{Declared, PackOp};
 pub use api::session::SessionSnapshotFn;
 pub use api::ui::render::{BlockRender, RenderCtx, RenderObject, renderer_generation};
+pub use api::ui::{TranscriptMarkdownFn, set_transcript_markdown};
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,
     HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest, SessionRequest,

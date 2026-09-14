@@ -1,10 +1,14 @@
 use std::borrow::Cow;
 
+use crate::components::tool_display::resolve_span_style;
 use crate::theme;
 use crate::theme::Theme;
+use maki_agent::types::{DefaultColor, InlineStyle};
+use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle};
+use maki_highlight::SegmentColor;
 use maki_markdown::Emphasis;
 use maki_markdown::render::{self, Line as RLine, LineKind, Span as RSpan, StyleToken};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 pub const TRUNCATION_PREFIX: &str = "...";
@@ -241,6 +245,70 @@ pub fn text_to_lines(
     };
     let semantic = render::Renderer::unwrapped().render(text, width);
     paint_semantic(&semantic, prefix, text_style, prefix_style)
+}
+
+/// The host side of `maki.ui.transcript_markdown`: the transcript's own
+/// renderer, handed to Lua as IR, so the Lua default renderer cannot drift
+/// from what the transcript draws.
+pub(crate) fn transcript_markdown(
+    text: &str,
+    width: u16,
+    prefix: &str,
+    text_style: &SpanStyle,
+    prefix_style: &SpanStyle,
+) -> Vec<SnapshotLine> {
+    text_to_lines(
+        text,
+        prefix,
+        resolve_span_style(text_style),
+        resolve_span_style(prefix_style),
+        width,
+        None,
+    )
+    .iter()
+    .map(snapshot_line)
+    .collect()
+}
+
+/// Installs [`transcript_markdown`] for the Lua primitive. A once-off at UI
+/// startup; headless hosts leave the slot unset.
+pub(crate) fn install_transcript_markdown() {
+    maki_lua::set_transcript_markdown(transcript_markdown);
+}
+
+fn snapshot_line(line: &Line<'static>) -> SnapshotLine {
+    SnapshotLine {
+        spans: line
+            .spans
+            .iter()
+            .map(|span| SnapshotSpan {
+                text: span.content.to_string(),
+                style: SpanStyle::Inline(snapshot_style(span.style)),
+            })
+            .collect(),
+    }
+}
+
+fn snapshot_style(style: Style) -> InlineStyle {
+    let on = |m| style.add_modifier.contains(m) && !style.sub_modifier.contains(m);
+    InlineStyle {
+        fg: style.fg.map(snapshot_color),
+        bg: style.bg.map(snapshot_color),
+        bold: on(Modifier::BOLD),
+        italic: on(Modifier::ITALIC),
+        underline: on(Modifier::UNDERLINED),
+        dim: on(Modifier::DIM),
+        strikethrough: on(Modifier::CROSSED_OUT),
+        reversed: on(Modifier::REVERSED),
+    }
+}
+
+fn snapshot_color(color: Color) -> SpanColor {
+    match theme::segment_color(color) {
+        SegmentColor::Rgb(rgb) => SpanColor::Rgb(rgb),
+        SegmentColor::Ansi(i) => SpanColor::Ansi(i),
+        SegmentColor::Default => SpanColor::Default(DefaultColor::Default),
+    }
 }
 
 pub struct TruncatedOutput<'a> {

@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use humantime::format_duration;
+use maki_agent::{SnapshotLine, SpanStyle};
 use maki_highlight::{DEFAULT_COLOR_NAME, SegmentColor};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, Result as LuaResult, Table, Value};
@@ -135,6 +136,93 @@ fn theme_color(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
     Ok(mlua::Value::String(
         lua.create_string(segment_color_to_lua(color))?,
     ))
+}
+
+/// Returns a named theme style as a style table you can pass to a span and
+/// then adjust, e.g. to add a modifier the theme does not set.
+///
+/// The name is the same one a span style string takes, such as `"tool_success"`
+/// or `"accent"`. The table holds the resolved `fg`/`bg` and only the modifiers
+/// that are on (`bold`, `italic`, `underline`, `dim`, `strikethrough`,
+/// `reversed`), so you can set or clear any before returning it. Unlike
+/// `theme_color`, it keeps modifiers and knows the host's UI name set.
+///
+/// @param name string A named theme style, e.g. "tool_success".
+/// @return (table|nil) A span style table, or nil when the name is unknown.
+/// @example
+/// local style = maki.ui.theme_style("tool_success")
+/// if style then
+///   style.bold = true
+/// end
+/// buf:line({ { "all done", style } })
+#[lua_fn]
+fn theme_style(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
+    let Some(style) = maki_highlight::ui_style(&name) else {
+        return Ok(mlua::Value::Nil);
+    };
+    Ok(mlua::Value::Table(buf::ui_style_to_lua(lua, &style)?))
+}
+
+/// The host's native transcript Markdown renderer, installed at UI startup.
+pub type TranscriptMarkdownFn = fn(&str, u16, &str, &SpanStyle, &SpanStyle) -> Vec<SnapshotLine>;
+
+static TRANSCRIPT_MARKDOWN: OnceLock<TranscriptMarkdownFn> = OnceLock::new();
+
+/// Installs the renderer behind `maki.ui.transcript_markdown`. Headless hosts
+/// leave it unset, and the primitive then answers nil.
+pub fn set_transcript_markdown(renderer: TranscriptMarkdownFn) {
+    let _ = TRANSCRIPT_MARKDOWN.set(renderer);
+}
+
+/// Renders Markdown exactly as the transcript does and returns its styled
+/// lines, so a block renderer can reproduce what the transcript would draw
+/// without a second implementation.
+///
+/// `opts.prefix` shares the first line for inline blocks (paragraph, list,
+/// heading) and gets a leader line of its own for standalone blocks (code,
+/// table, horizontal rule), matching the transcript. `opts.text_style` and
+/// `opts.prefix_style` take the theme styles for the role line. Returns nil
+/// when the host has no native renderer (headless).
+///
+/// @param text string Markdown source.
+/// @param width integer Wrap width in display cells, > 0.
+/// @param opts table|nil `{prefix?, text_style?, prefix_style?}`.
+/// @return (table|nil) Lines, each a span list, or nil when unavailable.
+/// @example
+/// return maki.ui.transcript_markdown(block.text, ctx.width, {
+///   prefix = "maki> ",
+///   text_style = maki.ui.theme_style("assistant"),
+///   prefix_style = maki.ui.theme_style("assistant_prefix"),
+/// })
+#[lua_fn]
+fn transcript_markdown(
+    lua: &Lua,
+    text: String,
+    width: Value,
+    opts: Option<Table>,
+) -> LuaResult<Value> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let mut prefix = String::new();
+    let mut text_style = SpanStyle::Default;
+    let mut prefix_style = SpanStyle::Default;
+    if let Some(opts) = opts {
+        prefix = opts.get::<Option<String>>("prefix")?.unwrap_or_default();
+        if let Some(value) = opts.get::<Option<Value>>("text_style")? {
+            text_style = buf::parse_style(&value)?;
+        }
+        if let Some(value) = opts.get::<Option<Value>>("prefix_style")? {
+            prefix_style = buf::parse_style(&value)?;
+        }
+    }
+    let Some(render) = TRANSCRIPT_MARKDOWN.get() else {
+        return Ok(Value::Nil);
+    };
+    let lines = render(&text, width, &prefix, &text_style, &prefix_style);
+    let out = lua.create_table_with_capacity(lines.len(), 0)?;
+    for (i, line) in lines.iter().enumerate() {
+        out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
+    }
+    Ok(Value::Table(out))
 }
 
 /// Syntax-highlights a chunk of source code. Returns a table of styled
@@ -622,7 +710,8 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, highlight, markdown, humantime, terminal_size,
+        buf, theme_color, theme_style, transcript_markdown, highlight, markdown, humantime,
+        terminal_size,
         display_width, truncate_text, wrap, raw, lines,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
         manual set_block_renderer, manual set_window_title,
@@ -850,8 +939,9 @@ fn markdown_lines_to_lua(lua: &Lua, lines: &[maki_markdown::render::Line]) -> Lu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maki_highlight::StyledSegment;
+    use maki_highlight::{StyledSegment, UiStyle};
     use mlua::Lua;
+    use std::collections::HashMap;
     use test_case::test_case;
 
     const MISSING_KEY: &str = "missing";
@@ -1564,5 +1654,28 @@ mod tests {
     fn dimension_errors_throw(code: &str, expected: &str) {
         let err = ui_lua().load(code).exec().unwrap_err().to_string();
         assert!(err.contains(expected), "expected {expected:?} in: {err}");
+    }
+
+    #[test]
+    fn theme_style_returns_the_published_style_or_nil() {
+        const NAME: &str = "tool_success";
+        maki_highlight::set_ui_styles(HashMap::from([(
+            NAME.to_owned(),
+            UiStyle {
+                fg: Some(SegmentColor::Ansi(2)),
+                bold: true,
+                ..UiStyle::default()
+            },
+        )]));
+        let lua = ui_lua();
+        let style: Table = lua
+            .load(format!(r#"return ui.theme_style("{NAME}")"#))
+            .eval()
+            .unwrap();
+        assert_eq!(style.get::<String>("fg").unwrap(), "2");
+        assert!(style.get::<bool>("bold").unwrap());
+        assert!(style.get::<Option<bool>>("italic").unwrap().is_none());
+        let unknown: Value = lua.load(r#"return ui.theme_style("nope")"#).eval().unwrap();
+        assert!(matches!(unknown, Value::Nil));
     }
 }

@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use arc_swap::{ArcSwap, Guard};
 use maki_agent::SpanColor;
-use maki_highlight::SegmentColor;
+use maki_highlight::{SegmentColor, UiStyle};
 use maki_storage::StateDir;
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
@@ -357,8 +357,78 @@ pub fn current_theme_name() -> String {
 }
 
 pub fn style_by_name(name: &str) -> Style {
-    let t = current();
-    match name {
+    named_style(&current(), name).unwrap_or_default()
+}
+
+/// Every name [`named_style`] resolves, for publishing the set to plugin Lua.
+/// A name added to the match must be added here to be reachable through
+/// `maki.ui.theme_style`.
+pub(crate) const STYLE_NAMES: &[&str] = &[
+    "dim",
+    "tool_dim",
+    "path",
+    "tool_path",
+    "tool",
+    "tool_prefix",
+    "tool_success",
+    "tool_error",
+    "tool_annotation",
+    "spinner",
+    "thinking",
+    "error",
+    "user",
+    "assistant",
+    "assistant_prefix",
+    "bold",
+    "italic",
+    "bold_italic",
+    "inline_code",
+    "strikethrough",
+    "heading",
+    "list_marker",
+    "horizontal_rule",
+    "code_gutter",
+    "table_border",
+    "keyword",
+    "index_keyword",
+    "section",
+    "index_section",
+    "line_nr",
+    "index_line_nr",
+    "diff_old",
+    "diff_new",
+    "diff_old_sign",
+    "diff_new_sign",
+    "diff_line_nr",
+    "diff_old_line_nr",
+    "diff_new_line_nr",
+    "item",
+    "item_desc",
+    "item_selected",
+    "selected",
+    "item_match",
+    "match",
+    "item_match_selected",
+    "match_selected",
+    "cursor",
+    "foreground",
+    "accent",
+    "active",
+    "keybind_key",
+    "keybind_desc",
+    "keybind_section",
+    "success",
+    "todo_completed",
+    "warning",
+    "todo_in_progress",
+    "todo_pending",
+    "pending",
+    "todo_cancelled",
+    "cancelled",
+];
+
+fn named_style(t: &Theme, name: &str) -> Option<Style> {
+    Some(match name {
         "dim" | "tool_dim" => t.tool_dim,
         "path" | "tool_path" => t.tool_path,
         "tool" => t.tool,
@@ -369,6 +439,9 @@ pub fn style_by_name(name: &str) -> Style {
         "spinner" => t.spinner,
         "thinking" => t.thinking,
         "error" => t.error,
+        "user" => t.user,
+        "assistant" => t.assistant,
+        "assistant_prefix" => t.assistant_prefix,
         "bold" => t.bold,
         "italic" => t.italic,
         "bold_italic" => t.bold_italic,
@@ -405,7 +478,32 @@ pub fn style_by_name(name: &str) -> Style {
         "warning" | "todo_in_progress" => t.todo_in_progress,
         "todo_pending" | "pending" => t.todo_pending,
         "todo_cancelled" | "cancelled" => t.todo_cancelled,
-        _ => Style::default(),
+        _ => return None,
+    })
+}
+
+/// The current style for every name [`style_by_name`] knows, in the shape
+/// plugin Lua speaks.
+pub(crate) fn named_styles() -> Vec<(&'static str, UiStyle)> {
+    let t = current();
+    STYLE_NAMES
+        .iter()
+        .filter_map(|&name| named_style(&t, name).map(|style| (name, ui_style(style))))
+        .collect()
+}
+
+/// A ratatui style as the `{fg, bg, bold, ...}` table a plugin span takes.
+pub(crate) fn ui_style(style: Style) -> UiStyle {
+    let on = |m| style.add_modifier.contains(m) && !style.sub_modifier.contains(m);
+    UiStyle {
+        fg: style.fg.map(segment_color),
+        bg: style.bg.map(segment_color),
+        bold: on(Modifier::BOLD),
+        italic: on(Modifier::ITALIC),
+        underline: on(Modifier::UNDERLINED),
+        dim: on(Modifier::DIM),
+        strikethrough: on(Modifier::CROSSED_OUT),
+        reversed: on(Modifier::REVERSED),
     }
 }
 
@@ -1326,6 +1424,20 @@ diff_new_line_nr = { fg = "red" }
         assert_eq!(t.diff_old_sign.bg, t.diff_old.bg);
         assert_eq!(t.diff_new_line_nr.fg, Some(Color::Rgb(0xff, 0x55, 0x55)));
         assert_eq!(t.diff_new_line_nr.bg, t.diff_line_nr.bg);
+    }
+
+    /// Every published name must resolve, or `maki.ui.theme_style` silently
+    /// answers nil for a name a span style string accepts.
+    #[test]
+    fn style_names_all_resolve() {
+        set(dracula());
+        let t = current();
+        for name in STYLE_NAMES {
+            assert!(
+                named_style(&t, name).is_some(),
+                "unresolved style name: {name}"
+            );
+        }
     }
 
     #[test]
