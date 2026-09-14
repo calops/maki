@@ -13,7 +13,7 @@ use maki_providers::ImageMediaType;
 use ratatui::backend::TestBackend;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use test_case::test_case;
 
 const UNDECODABLE_IMAGE: &str = "invalid image";
@@ -2963,6 +2963,119 @@ fn lua_block_lines(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
     let (lines, raw) = block::render(&objects).expect("valid render objects");
     assert!(raw.is_empty());
     lines
+}
+
+/// Render objects for a block, with an optional extra renderer layered on top
+/// of the bundled plugin.
+fn block_objects(
+    message: &DisplayMessage,
+    width: u16,
+    fixture: Option<&str>,
+) -> Vec<maki_lua::RenderObject> {
+    const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+    const NO_OBJECTS: &str = "the renderer chain must produce objects";
+
+    crate::markdown::install_transcript_markdown();
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
+        .expect("every bundled plugin loads");
+    if let Some(source) = fixture {
+        host.load_source("tool_fixture", source)
+            .expect("fixture loads");
+    }
+    let reply = host.event_handle().request_render_block(
+        block::project(message),
+        RenderCtx {
+            width,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(REPLY_TIMEOUT).expect("render reply")
+    else {
+        panic!("{NO_OBJECTS}");
+    };
+    objects
+}
+
+fn tool_message() -> DisplayMessage {
+    let role = DisplayRole::Tool(Box::new(ToolRole {
+        id: "t1".to_owned(),
+        status: ToolStatus::Success,
+        name: Arc::from("bash"),
+    }));
+    let mut message = DisplayMessage::new(role, "list files\nsrc/main.rs".to_owned());
+    message.timestamp = Some("12:00".to_owned());
+    message
+}
+
+fn native_tool_lines(
+    message: &DisplayMessage,
+    width: u16,
+) -> (
+    Vec<Line<'static>>,
+    crate::components::tool_display::ToolLines,
+) {
+    let output_lines = maki_config::ToolOutputLines::default();
+    let rctx = crate::components::tool_display::RenderCtx {
+        started_at: Instant::now(),
+        width,
+        tool_output_lines: &output_lines,
+    };
+    let native = MessagesPanel::build_tool_segment_lines(
+        message,
+        ToolStatus::Success,
+        &rctx,
+        SectionFlags::default(),
+    );
+    (native.lines.clone(), native)
+}
+
+/// The host's native tool body must survive the Lua round trip untouched:
+/// same lines, same metadata, no matter that a renderer placed it.
+#[test]
+fn lua_tool_renderer_places_the_native_body_unchanged() {
+    const WIDTH: u16 = 80;
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    let message = tool_message();
+    let (expected, native) = native_tool_lines(&message, WIDTH);
+    let objects = block_objects(&message, WIDTH, None);
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody)),
+        "the bundled plugin must ask for the native tool body"
+    );
+    let rendered = block::render_with_tools(&objects, Some(native)).expect("body placed");
+    assert_eq!(rendered.lines, expected);
+    assert_eq!(rendered.tool.expect("tool body").offset, 0);
+}
+
+const TOOL_WRAP_FIXTURE: &str = r#"
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  if block.kind ~= "tool" then
+    return prev(block, ctx)
+  end
+  return { "above", maki.ui.transcript_tool(), "below" }
+end)
+"#;
+
+/// Lua positions the body: the host shifts the body's highlight, spinner and
+/// snapshot offsets by the lines Lua put above it.
+#[test]
+fn lua_tool_renderer_can_compose_around_the_native_body() {
+    const WIDTH: u16 = 80;
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    let message = tool_message();
+    let (expected, native) = native_tool_lines(&message, WIDTH);
+    let objects = block_objects(&message, WIDTH, Some(TOOL_WRAP_FIXTURE));
+    let rendered = block::render_with_tools(&objects, Some(native)).expect("body placed");
+    let body = rendered.tool.expect("tool body");
+    assert_eq!(body.offset, 1);
+    assert_eq!(rendered.lines.len(), expected.len() + 2);
+    assert_eq!(rendered.lines[0].spans[0].content.as_ref(), "above");
+    assert_eq!(&rendered.lines[1..1 + expected.len()], expected.as_slice());
 }
 
 /// The bundled `ui` plugin owns `done` now, so its render objects must land on

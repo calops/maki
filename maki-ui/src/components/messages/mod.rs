@@ -873,8 +873,9 @@ impl MessagesPanel {
 
     /// Asks the block renderer for the eligible blocks and applies what came
     /// back. Runs outside `view`, so painting only ever reads lines a segment
-    /// already holds. Tool and thinking blocks keep their Rust rendering until
-    /// their interactions move over too.
+    /// already holds. A tool block's render may place the host's native body,
+    /// which is why the panel still builds those lines here: the highlight,
+    /// spinner, snapshot and click offsets stay host-owned.
     fn tick_block_renders(&mut self) -> Dirty {
         let key = RenderKey {
             width: self.viewport_width,
@@ -882,12 +883,17 @@ impl MessagesPanel {
             mode: Arc::clone(&self.render_mode),
             generation: maki_lua::renderer_generation(),
         };
+        let started_at = self.started_at;
+        let width = self.viewport_width;
+        let tool_output_lines = self.tool_output_lines;
         let Self {
             messages,
             cache,
             block_render,
             lua_event_handle,
             renderer_errors,
+            expanded_tools,
+            hl_worker,
             ..
         } = self;
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
@@ -909,18 +915,70 @@ impl MessagesPanel {
         let changed = block_render.poll(|plugin, generation, message| {
             renderer_errors.report(plugin, generation, message);
         });
+        let rctx = RenderCtx {
+            started_at,
+            width,
+            tool_output_lines: &tool_output_lines,
+        };
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
             let id = BlockId::new(index as u64);
-            let rendered = block_render
-                .objects(id, segment.revision(), &key)
-                .and_then(block::render);
-            match rendered {
-                Some((lines, raw)) => segment.set_lua_render(Some(lines), raw),
-                None if segment.has_lua_lines() => segment.set_lua_render(None, Vec::new()),
-                None => {}
+            let revision = segment.revision();
+            if segment
+                .render_key()
+                .is_some_and(|(drawn, drawn_key)| *drawn == revision && *drawn_key == key)
+            {
+                continue;
+            }
+            let Some(objects) = block_render.objects(id, revision, &key) else {
+                if segment.has_lua_lines() {
+                    segment.set_lua_render(None, Vec::new());
+                }
+                continue;
+            };
+            let Some(message) = segment.msg_index.and_then(|i| messages.get(i)) else {
+                continue;
+            };
+            let applied = match &message.role {
+                DisplayRole::Tool(tool) => {
+                    let expanded = expanded_tools.get(&tool.id).copied().unwrap_or_default();
+                    let tool_lines =
+                        Self::build_tool_segment_lines(message, tool.status, &rctx, expanded);
+                    match block::render_with_tools(objects, Some(tool_lines)) {
+                        Some(rendered) => match rendered.tool {
+                            Some(body) => {
+                                segment.apply_tool_render(rendered.lines, body, hl_worker);
+                                true
+                            }
+                            None => {
+                                segment.set_lua_render(Some(rendered.lines), rendered.raw);
+                                true
+                            }
+                        },
+                        None => Self::reset_unrenderable(segment),
+                    }
+                }
+                _ => match block::render(objects) {
+                    Some((lines, raw)) => {
+                        segment.set_lua_render(Some(lines), raw);
+                        true
+                    }
+                    None => Self::reset_unrenderable(segment),
+                },
+            };
+            if applied {
+                segment.mark_render_applied(revision, key.clone());
             }
         }
         Dirty::from(changed)
+    }
+
+    /// Drops lines a refused render left behind, so the segment falls back to
+    /// its Rust rendering instead of keeping a stale frame.
+    fn reset_unrenderable(segment: &mut Segment) -> bool {
+        if segment.has_lua_lines() {
+            segment.set_lua_render(None, Vec::new());
+        }
+        false
     }
 
     pub fn cadence(&self) -> Cadence {

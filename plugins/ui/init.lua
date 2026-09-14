@@ -6,6 +6,7 @@ local BREAK_LINE = "([^\n]*)\n"
 local DONE = "done"
 local ERROR = "error"
 local THINKING = "thinking"
+local TOOL = "tool"
 local SUCCESS_STYLE = "tool_success"
 local ERROR_STYLE = "error"
 local THINKING_STYLE = "thinking"
@@ -91,6 +92,8 @@ maki.ui.set_block_renderer(function(prev, block, ctx)
     lines = plain_lines(block.text, ERROR_STYLE)
   elseif block.kind == THINKING then
     lines = thinking_lines(block, ctx)
+  elseif block.kind == TOOL then
+    lines = maki.ui.transcript_tool()
   else
     lines = response_lines(block, ctx)
   end

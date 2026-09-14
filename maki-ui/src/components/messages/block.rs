@@ -7,6 +7,8 @@ use ratatui::text::{Line, Span};
 use maki_lua::RenderObject;
 
 use super::raw;
+use crate::components::code_view::SectionFlags;
+use crate::components::tool_display::{HighlightRequest, ToolLines};
 use crate::components::{DisplayMessage, DisplayRole, ToolStatus, lua_float::snapshot_to_line};
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
@@ -45,17 +47,18 @@ pub(crate) fn kind(role: &DisplayRole) -> &'static str {
     }
 }
 
-/// Blocks the Lua renderer may own. Tool blocks keep their Rust rendering for
-/// now: clicks and collapsing hang off them. Thinking is static here; its
-/// collapse click still runs through the native row mapping. Images do not
-/// disqualify a block: `Segment::set_images` fills them in regardless of which
-/// side produced the lines.
+/// Blocks the Lua renderer may own. A tool block's render places the host's
+/// native body via `maki.ui.transcript_tool()`, so its interactions and
+/// metadata stay Rust-owned. Images do not disqualify a block:
+/// `Segment::set_images` fills them in regardless of which side produced the
+/// lines.
 pub(crate) fn renderable(message: &DisplayMessage) -> bool {
     matches!(
         message.role,
         DisplayRole::User
             | DisplayRole::Assistant
             | DisplayRole::Thinking
+            | DisplayRole::Tool(_)
             | DisplayRole::Error
             | DisplayRole::Done
     )
@@ -111,14 +114,51 @@ pub(crate) fn project(message: &DisplayMessage) -> serde_json::Value {
     serde_json::Value::Object(block)
 }
 
+/// A block render that asked for the native tool body, with its Rust-owned
+/// metadata shifted to where Lua composed it. Temporary, through the tool
+/// migration only.
+#[allow(dead_code)]
+pub(crate) struct ToolBody {
+    /// Index of the body's first line in the rendered block.
+    pub offset: usize,
+    /// Highlight request with its range already shifted. The host owns the
+    /// async highlight; Lua never sees or sets it.
+    pub highlight: Option<HighlightRequest>,
+    pub spinner_lines: Vec<(usize, usize)>,
+    pub snapshot_base: Option<usize>,
+    pub content_indent: &'static str,
+    pub truncation: SectionFlags,
+}
+
+/// The lines a block render produced, plus the tool body it placed, if any.
+pub(crate) struct Rendered {
+    pub lines: Vec<Line<'static>>,
+    pub raw: Vec<RawSpan>,
+    pub tool: Option<ToolBody>,
+}
+
 /// Render objects as ratatui lines plus the raw spans they place. Lines
 /// append their spans; a raw object appends `height` placeholder rows and
 /// records where its sequence goes. A raw sequence that fails validation
 /// refuses the whole block (`None`), so the caller keeps the Rust rendering
 /// and an unsafe sequence can never reach the terminal.
 pub(crate) fn render(objects: &[RenderObject]) -> Option<(Vec<Line<'static>>, Vec<RawSpan>)> {
+    let rendered = render_with_tools(objects, None)?;
+    Some((rendered.lines, rendered.raw))
+}
+
+/// [`render`] with the host's native tool body available. At most one
+/// [`RenderObject::ToolBody`] is allowed, and it must have a body to place:
+/// anything else refuses the block, so Lua can position the body but never
+/// supply its content or metadata.
+pub(crate) fn render_with_tools(
+    objects: &[RenderObject],
+    tool_lines: Option<ToolLines>,
+) -> Option<Rendered> {
     let mut lines = Vec::new();
     let mut raw = Vec::new();
+    let mut tool = tool_lines;
+    let mut body = None;
     for object in objects {
         match object {
             RenderObject::Lines(source) => {
@@ -137,14 +177,45 @@ pub(crate) fn render(objects: &[RenderObject]) -> Option<(Vec<Line<'static>>, Ve
                 let placeholder = Line::from(Span::raw(PLACEHOLDER_CELL.repeat(width as usize)));
                 lines.extend(std::iter::repeat_n(placeholder, height as usize));
             }
+            RenderObject::ToolBody => {
+                let mut tl = tool.take()?;
+                let offset = lines.len();
+                lines.append(&mut tl.lines);
+                body = Some(place_tool_body(tl, offset));
+            }
         }
     }
-    Some((lines, raw))
+    Some(Rendered {
+        lines,
+        raw,
+        tool: body,
+    })
+}
+
+fn place_tool_body(mut tl: ToolLines, offset: usize) -> ToolBody {
+    let mut highlight = tl.highlight.take();
+    if let Some(request) = &mut highlight {
+        request.range = (request.range.0 + offset, request.range.1 + offset);
+    }
+    let spinner_lines = tl
+        .spinner_lines
+        .iter()
+        .map(|(line, span)| (line + offset, *span))
+        .collect();
+    ToolBody {
+        offset,
+        highlight,
+        spinner_lines,
+        snapshot_base: tl.snapshot_base.map(|base| base + offset),
+        content_indent: tl.content_indent,
+        truncation: tl.truncation,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::code_view::RenderLimits;
     use crate::components::{IMAGE_PLACEHOLDER, ToolRole, ToolStatus};
     use maki_agent::SnapshotLine;
     use maki_providers::{ImageMediaType, ImageSource};
@@ -196,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn renderable_includes_thinking_and_excludes_tools() {
+    fn renderable_includes_thinking_and_tools() {
         assert!(renderable(&DisplayMessage::new(
             DisplayRole::Thinking,
             String::new()
@@ -206,7 +277,7 @@ mod tests {
             status: ToolStatus::Success,
             name: Arc::from("bash"),
         }));
-        assert!(!renderable(&DisplayMessage::new(tool, String::new())));
+        assert!(renderable(&DisplayMessage::new(tool, String::new())));
     }
 
     #[test]
@@ -281,5 +352,78 @@ mod tests {
             height: 1,
         }];
         assert!(render(&objects).is_none());
+    }
+
+    fn tool_lines() -> ToolLines {
+        ToolLines {
+            lines: vec![
+                Line::raw("bash> ls"),
+                Line::raw("  a.txt"),
+                Line::raw("  b.txt"),
+            ],
+            highlight: Some(HighlightRequest {
+                range: (1, 3),
+                input: None,
+                output: None,
+                limits: RenderLimits {
+                    script: 1,
+                    output: 2,
+                },
+            }),
+            spinner_lines: vec![(1, 0)],
+            snapshot_base: Some(1),
+            content_indent: "  ",
+            truncation: SectionFlags {
+                script: false,
+                output: true,
+            },
+        }
+    }
+
+    #[test]
+    fn tool_body_alone_keeps_the_native_lines_and_metadata() {
+        let objects = vec![RenderObject::ToolBody];
+        let rendered = render_with_tools(&objects, Some(tool_lines())).expect("body placed");
+        assert_eq!(
+            rendered.lines,
+            vec![
+                Line::raw("bash> ls"),
+                Line::raw("  a.txt"),
+                Line::raw("  b.txt")
+            ]
+        );
+        let body = rendered.tool.expect("tool body");
+        assert_eq!(body.offset, 0);
+        assert_eq!(body.highlight.expect("highlight").range, (1, 3));
+        assert_eq!(body.spinner_lines, vec![(1, 0)]);
+        assert_eq!(body.snapshot_base, Some(1));
+        assert!(body.truncation.output);
+    }
+
+    #[test]
+    fn tool_body_metadata_is_shifted_by_the_lines_lua_puts_above_it() {
+        let objects = vec![
+            RenderObject::Lines(vec![SnapshotLine::plain("above".to_owned())]),
+            RenderObject::ToolBody,
+            RenderObject::Lines(vec![SnapshotLine::plain("below".to_owned())]),
+        ];
+        let rendered = render_with_tools(&objects, Some(tool_lines())).expect("body placed");
+        assert_eq!(rendered.lines.len(), 5);
+        let body = rendered.tool.expect("tool body");
+        assert_eq!(body.offset, 1);
+        assert_eq!(body.highlight.expect("highlight").range, (2, 4));
+        assert_eq!(body.spinner_lines, vec![(2, 0)]);
+        assert_eq!(body.snapshot_base, Some(2));
+    }
+
+    #[test]
+    fn a_second_tool_body_refuses_the_block() {
+        let objects = vec![RenderObject::ToolBody, RenderObject::ToolBody];
+        assert!(render_with_tools(&objects, Some(tool_lines())).is_none());
+    }
+
+    #[test]
+    fn a_tool_body_without_a_native_body_refuses_the_block() {
+        assert!(render(&[RenderObject::ToolBody]).is_none());
     }
 }

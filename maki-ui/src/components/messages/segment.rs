@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use super::super::code_view::SectionFlags;
 use super::super::tool_display::{HighlightRequest, ToolLines};
-use super::block::RawSpan;
+use super::block::{RawSpan, ToolBody};
+use super::block_render::RenderKey;
 use ratatui::text::{Line, Span};
 use std::cell::Cell;
 use std::mem;
@@ -81,6 +82,10 @@ pub(super) struct Segment {
     pub spinner_lines: Vec<(usize, usize)>,
     snapshot_base: Option<usize>,
     pub content_indent: &'static str,
+    /// The render this segment already drew, so `tick` does not rebuild a tool
+    /// body or re-send a highlight on every frame. `set_lines` bumps the
+    /// revision, which makes the pair stale and lets the next render land.
+    applied_render: Option<(u64, RenderKey)>,
     /// The lines were built for another width or theme, so code blocks and
     /// tables are still wrapped to the old width and spans carry the old
     /// palette. Only the content ages, never the height, so a segment the
@@ -149,6 +154,14 @@ impl Segment {
 
     pub fn has_lua_lines(&self) -> bool {
         self.lua_lines.is_some()
+    }
+
+    pub fn render_key(&self) -> Option<&(u64, RenderKey)> {
+        self.applied_render.as_ref()
+    }
+
+    pub fn mark_render_applied(&mut self, revision: u64, key: RenderKey) {
+        self.applied_render = Some((revision, key));
     }
 
     /// Rows the lines take at `width`, measured at that width whatever
@@ -235,13 +248,24 @@ impl Segment {
     }
 
     pub fn update_spinners(&mut self, span: &Span<'static>) {
-        for &(line_idx, span_idx) in &self.spinner_lines {
-            if let Some(line) = self.lines.get_mut(line_idx)
+        for (line_idx, span_idx) in self.spinner_lines.clone() {
+            if let Some(line) = self.active_lines_mut().get_mut(line_idx)
                 && line.spans.len() > span_idx
             {
                 line.spans[span_idx] = span.clone();
             }
         }
+    }
+
+    /// The lines actually drawn: the renderer's when it owns the block, the
+    /// Rust-built ones otherwise. Highlighted and animated spans land here so
+    /// a Lua-owned tool block still gets its async syntax colours.
+    fn active_lines(&self) -> &[Line<'static>] {
+        self.lua_lines.as_deref().unwrap_or(&self.lines)
+    }
+
+    fn active_lines_mut(&mut self) -> &mut Vec<Line<'static>> {
+        self.lua_lines.as_mut().unwrap_or(&mut self.lines)
     }
 
     fn reuse_highlight(
@@ -252,14 +276,15 @@ impl Segment {
         if self.pending_highlight.is_some() || self.highlight_key != *key {
             return None;
         }
+        let lines = self.active_lines();
         let (s, e) = self.highlight_range?;
-        if s > e || e > self.lines.len() {
+        if s > e || e > lines.len() {
             return None;
         }
         if (e - s) != (new_range.1 - new_range.0) {
             return None;
         }
-        Some(self.lines[s..e].to_vec())
+        Some(lines[s..e].to_vec())
     }
 
     pub fn apply_highlight(&mut self, tl: ToolLines, worker: &RenderWorker) {
@@ -295,6 +320,49 @@ impl Segment {
         }
     }
 
+    /// Applies a block the Lua renderer composed, with the host's native tool
+    /// body placed inside it. Unlike `update_with_reuse` this never touches the
+    /// revision, because the content did not change: the same render is stable
+    /// across ticks and only re-sends a highlight when the lines it covers
+    /// actually change.
+    pub fn apply_tool_render(
+        &mut self,
+        mut lines: Vec<Line<'static>>,
+        body: ToolBody,
+        worker: &RenderWorker,
+    ) {
+        let key = HighlightKey::from_request(body.highlight.as_ref());
+        let range = body.highlight.as_ref().map(|h| h.range);
+        if self.pending_highlight.is_some()
+            && self.highlight_key == key
+            && self.highlight_range == range
+        {
+            return;
+        }
+        let reused = body.highlight.as_ref().and_then(|req| {
+            let hl_lines = self.reuse_highlight(&key, req.range)?;
+            let (start, _) = req.range;
+            let new_end = start + hl_lines.len();
+            lines.splice(start..req.range.1, hl_lines);
+            Some((start, new_end))
+        });
+        self.pending_highlight = match (&reused, &body.highlight) {
+            (None, Some(req)) => {
+                Some(worker.send(req.input.clone(), req.output.clone(), req.limits))
+            }
+            _ => None,
+        };
+        self.highlight_range = reused.or(range);
+        self.highlight_key = key;
+        self.truncation = body.truncation;
+        self.spinner_lines = body.spinner_lines;
+        self.snapshot_base = body.snapshot_base;
+        self.content_indent = body.content_indent;
+        self.lua_lines = Some(lines);
+        self.raw.clear();
+        self.invalidate_height();
+    }
+
     pub fn matches_pending_highlight(&self, id: u64) -> bool {
         self.pending_highlight == Some(id)
     }
@@ -312,7 +380,7 @@ impl Segment {
                 })
                 .collect();
             let new_end = start + indented.len();
-            self.lines.splice(start..end, indented);
+            self.active_lines_mut().splice(start..end, indented);
             self.highlight_range = Some((start, new_end));
             self.shift_after(end, new_end as isize - end as isize);
             self.invalidate_height();

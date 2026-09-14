@@ -5025,6 +5025,37 @@ return maki.ui.transcript_markdown(block.text, ctx.width, {
 
 ---
 
+### `maki.ui.transcript_tool()` {#maki-ui-transcript_tool}
+
+```lua
+maki.ui.transcript_tool()
+```
+
+Returns the render object that places the host's native tool body at this
+point in a block renderer's output.
+
+Temporary, for the tool migration only. Lua decides where the body goes and
+what surrounds it, while the host owns the body's content and every piece of
+its metadata: async syntax highlighting, spinner animation, live snapshot,
+truncation and click offsets. A render may include it at most once, and the
+host refuses the block otherwise. It carries no data, so none of that
+metadata can be forged.
+
+**Returns:** (`table`) `{tool = true}`.
+
+**Example:**
+
+```lua
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  if block.kind ~= "tool" then
+    return prev(block, ctx)
+  end
+  return maki.ui.lines({ "tool above", "tool below" }, maki.ui.transcript_tool())
+end)
+```
+
+---
+
 ### `maki.ui.highlight()` {#maki-ui-highlight}
 
 ```lua
@@ -5456,7 +5487,7 @@ maki.ui.set_status_hint(nil)
 maki.ui.set_block_renderer({fn})
 ```
 
-Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), or `{{raw = "...", width = n, height = n}}` to request a raw sequence in a reserved rectangle. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
+Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), `{{raw = "...", width = n, height = n}}` to request a raw sequence in a reserved rectangle, or `maki.ui.transcript_tool()` to place the host's native tool body. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
 
 **Parameters:**
 

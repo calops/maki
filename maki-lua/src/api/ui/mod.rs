@@ -226,6 +226,31 @@ fn transcript_markdown(
     Ok(Value::Table(out))
 }
 
+/// Returns the render object that places the host's native tool body at this
+/// point in a block renderer's output.
+///
+/// Temporary, for the tool migration only. Lua decides where the body goes and
+/// what surrounds it, while the host owns the body's content and every piece of
+/// its metadata: async syntax highlighting, spinner animation, live snapshot,
+/// truncation and click offsets. A render may include it at most once, and the
+/// host refuses the block otherwise. It carries no data, so none of that
+/// metadata can be forged.
+///
+/// @return (table) `{tool = true}`.
+/// @example
+/// maki.ui.set_block_renderer(function(prev, block, ctx)
+///   if block.kind ~= "tool" then
+///     return prev(block, ctx)
+///   end
+///   return maki.ui.lines({ "tool above", "tool below" }, maki.ui.transcript_tool())
+/// end)
+#[lua_fn]
+fn transcript_tool(lua: &Lua) -> LuaResult<Table> {
+    let object = lua.create_table_with_capacity(1, 0)?;
+    object.raw_set("tool", true)?;
+    Ok(object)
+}
+
 /// Syntax-highlights a chunk of source code. Returns a table of styled
 /// lines that you can feed into a buffer. Each line is a list of
 /// `{text, style}` spans where style is a `{fg, bold?, italic?, underline?}` table.
@@ -711,8 +736,8 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, highlight, markdown, humantime,
-        terminal_size,
+        buf, theme_color, theme_style, transcript_markdown, transcript_tool, highlight, markdown,
+        humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
         manual set_block_renderer, manual set_window_title,
@@ -1655,6 +1680,13 @@ mod tests {
     fn dimension_errors_throw(code: &str, expected: &str) {
         let err = ui_lua().load(code).exec().unwrap_err().to_string();
         assert!(err.contains(expected), "expected {expected:?} in: {err}");
+    }
+
+    #[test]
+    fn transcript_tool_returns_the_marker() {
+        let lua = ui_lua();
+        let object: Table = lua.load("return ui.transcript_tool()").eval().unwrap();
+        assert!(object.get::<bool>("tool").unwrap());
     }
 
     #[test]
