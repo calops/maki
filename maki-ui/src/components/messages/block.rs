@@ -45,14 +45,19 @@ pub(crate) fn kind(role: &DisplayRole) -> &'static str {
     }
 }
 
-/// Blocks the Lua renderer may own. Tool and thinking blocks keep their
-/// Rust rendering for now: clicks and collapsing hang off them. Images do
-/// not disqualify a block: `Segment::set_images` fills them in regardless of
-/// which side produced the lines.
+/// Blocks the Lua renderer may own. Tool blocks keep their Rust rendering for
+/// now: clicks and collapsing hang off them. Thinking is static here; its
+/// collapse click still runs through the native row mapping. Images do not
+/// disqualify a block: `Segment::set_images` fills them in regardless of which
+/// side produced the lines.
 pub(crate) fn renderable(message: &DisplayMessage) -> bool {
     matches!(
         message.role,
-        DisplayRole::User | DisplayRole::Assistant | DisplayRole::Error | DisplayRole::Done
+        DisplayRole::User
+            | DisplayRole::Assistant
+            | DisplayRole::Thinking
+            | DisplayRole::Error
+            | DisplayRole::Done
     )
 }
 
@@ -191,15 +196,17 @@ mod tests {
     }
 
     #[test]
-    fn renderable_excludes_tools_and_thinking() {
+    fn renderable_includes_thinking_and_excludes_tools() {
         assert!(renderable(&DisplayMessage::new(
-            DisplayRole::Assistant,
-            String::new()
-        )));
-        assert!(!renderable(&DisplayMessage::new(
             DisplayRole::Thinking,
             String::new()
         )));
+        let tool = DisplayRole::Tool(Box::new(ToolRole {
+            id: "t1".to_owned(),
+            status: ToolStatus::Success,
+            name: Arc::from("bash"),
+        }));
+        assert!(!renderable(&DisplayMessage::new(tool, String::new())));
     }
 
     #[test]

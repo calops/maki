@@ -3031,6 +3031,27 @@ fn lua_user_renderer_matches_the_rust_lines() {
     assert_role_markdown_parity(DisplayRole::User);
 }
 
+#[test]
+fn lua_thinking_renderer_matches_the_rust_lines() {
+    assert_role_markdown_parity(DisplayRole::Thinking);
+}
+
+/// The collapsed stand-in has to keep the native header, line count and expand
+/// hint, or the click region and search text would shift.
+#[test_case("" ; "empty")]
+#[test_case("one line" ; "single line")]
+#[test_case("a\nb\n" ; "trailing break")]
+fn lua_collapsed_thinking_matches_the_native_indicator(text: &str) {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    let mut message = DisplayMessage::new(DisplayRole::Thinking, text.to_owned());
+    message.thinking_collapsed = true;
+    assert_eq!(
+        lua_block_lines(&message, DONE_WIDTH),
+        crate::components::tool_display::thinking_indicator(logical_line_count(text), true)
+    );
+}
+
 /// The reason `theme_style` exists over `theme_color`: every modifier the theme
 /// puts on the success style has to survive the Lua round trip too.
 #[test]
