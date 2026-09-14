@@ -572,8 +572,13 @@ fn snapshot_to_lines_range(
     (lines, spinners)
 }
 
-fn span_color(c: SpanColor) -> Option<Color> {
-    theme::segment_slot(theme::segment_color_from_span(c))
+/// A span color as ratatui sees it. An explicit `Default` is the terminal's
+/// own color, distinct from an absent slot, which inherits the style beneath.
+fn span_color(c: SpanColor) -> Color {
+    match c {
+        SpanColor::Default(_) => Color::Reset,
+        other => theme::to_color(theme::segment_color_from_span(other)),
+    }
 }
 
 pub(crate) fn resolve_span_style(style: &SpanStyle) -> Style {
@@ -582,11 +587,11 @@ pub(crate) fn resolve_span_style(style: &SpanStyle) -> Style {
         SpanStyle::Named(name) => theme::style_by_name(name),
         SpanStyle::Inline(inline) => {
             let mut s = Style::default();
-            if let Some(fg) = inline.fg.and_then(span_color) {
-                s = s.fg(fg);
+            if let Some(fg) = inline.fg {
+                s = s.fg(span_color(fg));
             }
-            if let Some(bg) = inline.bg.and_then(span_color) {
-                s = s.bg(bg);
+            if let Some(bg) = inline.bg {
+                s = s.bg(span_color(bg));
             }
             if inline.bold {
                 s = s.bold();
@@ -1777,11 +1782,10 @@ mod tests {
         assert!(resolved.add_modifier.contains(Modifier::REVERSED));
     }
 
-    /// A span asking for the terminal default has to leave the slot empty.
-    /// Setting `Color::Reset` would win over the line style underneath it, and
-    /// the selected row of a plugin float would lose its highlight.
+    /// An explicit terminal default resolves to `Color::Reset`, kept distinct
+    /// from an absent slot, which inherits the enclosing style.
     #[test_case(SpanColor::Ansi(4), Some(Color::Blue) ; "palette index")]
-    #[test_case(SpanColor::Default(DefaultColor::Default), None ; "terminal default")]
+    #[test_case(SpanColor::Default(DefaultColor::Default), Some(Color::Reset) ; "terminal default")]
     fn resolve_span_style_inline_colors(color: SpanColor, expected: Option<Color>) {
         let style = SpanStyle::Inline(InlineStyle {
             fg: Some(color),
@@ -1790,6 +1794,13 @@ mod tests {
         });
         let resolved = resolve_span_style(&style);
         assert_eq!((resolved.fg, resolved.bg), (expected, expected));
+    }
+
+    #[test]
+    fn resolve_span_style_inline_without_colors_inherits() {
+        let style = SpanStyle::Inline(InlineStyle::default());
+        let resolved = resolve_span_style(&style);
+        assert_eq!((resolved.fg, resolved.bg), (None, None));
     }
 
     #[test]
