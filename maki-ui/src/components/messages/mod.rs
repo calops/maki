@@ -1,5 +1,5 @@
-mod block_render;
 mod block;
+mod block_render;
 #[allow(dead_code)]
 mod raw;
 mod render;

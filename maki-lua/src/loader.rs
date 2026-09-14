@@ -13,8 +13,8 @@ use maki_config::{GatedFile, PluginsConfig, ProjectConfig, RawConfig};
 
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
-use crate::api::util::command::{HintReader, LuaCommandReader, UiAction, UiAttachment};
 use crate::api::ui::render::{BlockRender, RenderCtx};
+use crate::api::util::command::{HintReader, LuaCommandReader, UiAction, UiAttachment};
 use crate::error::PluginError;
 use crate::pack::DiscoveredPackage;
 use crate::plugin_permissions::{
@@ -958,7 +958,10 @@ impl PluginHost {
         ctx: RenderCtx,
     ) -> flume::Receiver<BlockRender> {
         let (reply, rx) = flume::bounded(1);
-        let _ = self.inner.tx.send(Request::RenderBlock { block, ctx, reply });
+        let _ = self
+            .inner
+            .tx
+            .send(Request::RenderBlock { block, ctx, reply });
         rx
     }
 

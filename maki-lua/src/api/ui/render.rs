@@ -48,7 +48,11 @@ pub struct RenderCtx {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderObject {
     Lines(Vec<SnapshotLine>),
-    Raw { seq: String, width: u16, height: u16 },
+    Raw {
+        seq: String,
+        width: u16,
+        height: u16,
+    },
 }
 
 /// What a block renderer chain produced.
@@ -180,9 +184,9 @@ fn parse_result(value: Value) -> BlockRender {
     match value {
         Value::Nil | Value::Boolean(false) => BlockRender::Unhandled,
         Value::String(text) => match text.to_str() {
-            Ok(line) => BlockRender::Objects(vec![RenderObject::Lines(vec![
-                SnapshotLine::plain(line.to_owned()),
-            ])]),
+            Ok(line) => BlockRender::Objects(vec![RenderObject::Lines(vec![SnapshotLine::plain(
+                line.to_owned(),
+            )])]),
             Err(error) => BlockRender::Failed(error.to_string()),
         },
         Value::Table(table) => parse_objects(table),
@@ -310,13 +314,20 @@ mod tests {
     #[test]
     fn unhandled_when_no_layers() {
         let lua = lua_with_store();
-        assert_eq!(render(&lua, json!({"kind": "user"})), BlockRender::Unhandled);
+        assert_eq!(
+            render(&lua, json!({"kind": "user"})),
+            BlockRender::Unhandled
+        );
     }
 
     #[test]
     fn single_layer_returns_lines() {
         let lua = lua_with_store();
-        register(&lua, PLUGIN, "function(prev, block, ctx) return { 'hello' } end");
+        register(
+            &lua,
+            PLUGIN,
+            "function(prev, block, ctx) return { 'hello' } end",
+        );
         let BlockRender::Objects(objects) = render(&lua, json!({"kind": "user"})) else {
             panic!("expected objects");
         };
@@ -368,8 +379,15 @@ mod tests {
     #[test]
     fn callback_returning_nil_is_unhandled() {
         let lua = lua_with_store();
-        register(&lua, PLUGIN, "function(prev, block, ctx) return prev(block, ctx) end");
-        assert_eq!(render(&lua, json!({"kind": "user"})), BlockRender::Unhandled);
+        register(
+            &lua,
+            PLUGIN,
+            "function(prev, block, ctx) return prev(block, ctx) end",
+        );
+        assert_eq!(
+            render(&lua, json!({"kind": "user"})),
+            BlockRender::Unhandled
+        );
     }
 
     #[test]
@@ -446,7 +464,11 @@ mod tests {
     #[test_case("return 42" ; "non_line_value")]
     fn malformed_output_fails(source: &str) {
         let lua = lua_with_store();
-        register(&lua, PLUGIN, &format!("function(prev, block, ctx) {source} end"));
+        register(
+            &lua,
+            PLUGIN,
+            &format!("function(prev, block, ctx) {source} end"),
+        );
         assert!(matches!(
             render(&lua, json!({"kind": "user"})),
             BlockRender::Failed(_)
@@ -459,7 +481,9 @@ mod tests {
         let plugin: Arc<str> = Arc::from(PLUGIN);
         for text in ["first", "second"] {
             let func: Function = lua
-                .load(format!("function(prev, block, ctx) return {{ '{text}' }} end"))
+                .load(format!(
+                    "function(prev, block, ctx) return {{ '{text}' }} end"
+                ))
                 .eval()
                 .expect("valid renderer");
             set_block_renderer(&lua, &plugin, Value::Function(func)).expect("register");
@@ -480,7 +504,10 @@ mod tests {
             .expect("valid renderer");
         set_block_renderer(&lua, &plugin, Value::Function(func)).expect("register");
         set_block_renderer(&lua, &plugin, Value::Nil).expect("clear");
-        assert_eq!(render(&lua, json!({"kind": "user"})), BlockRender::Unhandled);
+        assert_eq!(
+            render(&lua, json!({"kind": "user"})),
+            BlockRender::Unhandled
+        );
     }
 
     #[test]
@@ -506,4 +533,3 @@ mod tests {
         assert!(set_block_renderer(&lua, &plugin, Value::Integer(1)).is_err());
     }
 }
-

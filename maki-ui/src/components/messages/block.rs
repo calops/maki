@@ -103,7 +103,9 @@ mod tests {
 
     #[test]
     fn lines_for_refuses_raw_blocks() {
-        let lines = vec![RenderObject::Lines(vec![SnapshotLine::plain("a".to_owned())])];
+        let lines = vec![RenderObject::Lines(vec![SnapshotLine::plain(
+            "a".to_owned(),
+        )])];
         assert!(lines_for(&lines).is_some());
         let mut mixed = lines;
         mixed.push(RenderObject::Raw {

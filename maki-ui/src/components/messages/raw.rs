@@ -228,10 +228,12 @@ mod tests {
         let mut overlay = RawOverlay::default();
         let viewport = Rect::new(0, 0, 80, 24);
         overlay.begin();
-        overlay.place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", viewport)
+        overlay
+            .place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", viewport)
             .unwrap();
         overlay.begin();
-        overlay.place(Rect::new(1, 5, 2, 1), "\u{1b}[32m", viewport)
+        overlay
+            .place(Rect::new(1, 5, 2, 1), "\u{1b}[32m", viewport)
             .unwrap();
         let rects = overlay.invalidate();
         assert!(rects.contains(&Rect::new(1, 1, 2, 1)));
@@ -243,7 +245,8 @@ mod tests {
         let mut overlay = RawOverlay::default();
         let viewport = Rect::new(0, 0, 80, 24);
         overlay.begin();
-        overlay.place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", viewport)
+        overlay
+            .place(Rect::new(1, 1, 2, 1), "\u{1b}[31m", viewport)
             .unwrap();
         overlay.begin();
         assert_eq!(overlay.invalidate(), vec![Rect::new(1, 1, 2, 1)]);
@@ -267,7 +270,11 @@ mod tests {
     fn refused_sequence_leaves_no_placement() {
         let mut overlay = RawOverlay::default();
         assert_eq!(
-            overlay.place(Rect::new(0, 0, 1, 1), "\u{1b}]0;x\u{7}", Rect::new(0, 0, 80, 24)),
+            overlay.place(
+                Rect::new(0, 0, 1, 1),
+                "\u{1b}]0;x\u{7}",
+                Rect::new(0, 0, 80, 24)
+            ),
             Err(RawViolation::Osc)
         );
         assert!(overlay.invalidate().is_empty());
