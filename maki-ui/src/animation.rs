@@ -18,6 +18,17 @@ pub fn spinner_str(elapsed_ms: u128) -> &'static str {
     SPINNER_STRS[(elapsed_ms / SPINNER_FRAME_MS) as usize % SPINNER_STRS.len()]
 }
 
+/// No user-facing setting disables spinners yet; this is the single switch a
+/// reduced-motion option would bind to. While false, [`spinner_glyph`] paints
+/// the first frame so a spinner never moves.
+const SPINNER_ANIMATION: bool = true;
+
+/// The spinner glyph for a clock reading, or the static first frame when
+/// animation is off.
+pub fn spinner_glyph(elapsed_ms: u128) -> &'static str {
+    spinner_str(if SPINNER_ANIMATION { elapsed_ms } else { 0 })
+}
+
 /// Spinners need a consistent time reference. Using a static epoch avoids
 /// passing Instant through every render call.
 pub fn animation_elapsed_ms() -> u128 {

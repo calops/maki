@@ -2,14 +2,21 @@
 //! renderer receives, and the conversion of its render objects back into
 //! ratatui lines.
 
+use std::sync::Arc;
+
 use ratatui::text::{Line, Span};
 
+use maki_agent::types::InlineStyle;
+use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle};
 use maki_lua::RenderObject;
 
 use super::raw;
 use crate::components::code_view::SectionFlags;
-use crate::components::tool_display::{HighlightRequest, ToolLines};
-use crate::components::{DisplayMessage, DisplayRole, ToolStatus, lua_float::snapshot_to_line};
+use crate::components::tool_display::{
+    HighlightRequest, SpinnerLine, ToolLines, resolve_span_style, spinner_span, spinner_style_name,
+    spinner_token,
+};
+use crate::components::{DisplayMessage, DisplayRole, ToolStatus};
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
 /// run of placeholder cells.
@@ -111,7 +118,108 @@ pub(crate) fn project(message: &DisplayMessage) -> serde_json::Value {
             block.insert(key.into(), value.clone().into());
         }
     }
+    if let DisplayRole::Tool(tool) = &message.role {
+        block.insert("tool".into(), tool_block(message, &tool.name));
+    }
     serde_json::Value::Object(block)
+}
+
+/// The structured `tool` object: identity, lifecycle, and the header content
+/// a renderer needs, never a pre-rendered string.
+fn tool_block(message: &DisplayMessage, name: &str) -> serde_json::Value {
+    let header_text = message
+        .text
+        .split_once('\n')
+        .map_or(message.text.as_str(), |(head, _)| head);
+    let header = match &message.render_header {
+        Some(snapshot) => serde_json::json!({
+            "kind": "snapshot",
+            "lines": snapshot.lines.iter().map(snapshot_line_json).collect::<Vec<_>>(),
+        }),
+        None => {
+            let mut header = serde_json::Map::new();
+            header.insert("kind".into(), "text".into());
+            header.insert("text".into(), header_text.into());
+            if let Some(annotation) = &message.annotation {
+                header.insert("annotation".into(), annotation.clone().into());
+            }
+            serde_json::Value::Object(header)
+        }
+    };
+    let mut tool = serde_json::Map::new();
+    tool.insert("name".into(), name.into());
+    tool.insert("status".into(), phase(&message.role).into());
+    for (key, value) in [
+        ("usage", &message.turn_usage),
+        ("timestamp", &message.timestamp),
+    ] {
+        if let Some(value) = value {
+            tool.insert(key.into(), value.clone().into());
+        }
+    }
+    tool.insert("header".into(), header);
+    serde_json::Value::Object(tool)
+}
+
+/// A snapshot line in the same `{text, style?}` span shape the Lua span
+/// grammar takes. Legacy dynamic-spinner styles become the semantic spinner
+/// form here, so Lua never learns the internal string convention.
+fn snapshot_line_json(line: &SnapshotLine) -> serde_json::Value {
+    line.spans
+        .iter()
+        .map(snapshot_span_json)
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn snapshot_span_json(span: &SnapshotSpan) -> serde_json::Value {
+    let text = serde_json::Value::String(span.text.clone());
+    match &span.style {
+        SpanStyle::Named(name) => match spinner_token(name) {
+            Some(token) => serde_json::json!([text, { "spinner": token }]),
+            None => serde_json::json!([text, name]),
+        },
+        SpanStyle::Default => serde_json::json!([text]),
+        SpanStyle::Inline(inline) => serde_json::json!([text, inline_json(inline)]),
+    }
+}
+
+fn inline_json(inline: &InlineStyle) -> serde_json::Value {
+    let mut style = serde_json::Map::new();
+    for (key, color) in [
+        ("fg", inline.fg),
+        ("bg", inline.bg),
+        ("underline_color", inline.underline_color),
+    ] {
+        if let Some(color) = color {
+            style.insert(key.into(), span_color_json(color));
+        }
+    }
+    for (key, on) in [
+        ("bold", inline.bold),
+        ("italic", inline.italic),
+        ("underline", inline.underline),
+        ("dim", inline.dim),
+        ("strikethrough", inline.strikethrough),
+        ("reversed", inline.reversed),
+        ("hidden", inline.hidden),
+        ("slow_blink", inline.slow_blink),
+        ("rapid_blink", inline.rapid_blink),
+    ] {
+        if on {
+            style.insert(key.into(), true.into());
+        }
+    }
+    serde_json::Value::Object(style)
+}
+
+/// A color in the `#rrggbb | index | default` grammar the span parser accepts.
+fn span_color_json(color: SpanColor) -> serde_json::Value {
+    match color {
+        SpanColor::Rgb((r, g, b)) => serde_json::json!(format!("#{r:02x}{g:02x}{b:02x}")),
+        SpanColor::Ansi(index) => serde_json::json!(index.to_string()),
+        SpanColor::Default(_) => serde_json::json!("default"),
+    }
 }
 
 /// A block render that asked for the native tool body, with its Rust-owned
@@ -124,27 +232,25 @@ pub(crate) struct ToolBody {
     /// Highlight request with its range already shifted. The host owns the
     /// async highlight; Lua never sees or sets it.
     pub highlight: Option<HighlightRequest>,
-    pub spinner_lines: Vec<(usize, usize)>,
+    pub spinner_lines: Vec<SpinnerLine>,
     pub snapshot_base: Option<usize>,
     pub content_indent: &'static str,
     pub truncation: SectionFlags,
 }
 
-/// The lines a block render produced, plus the tool body it placed, if any.
+/// The lines a block render produced, plus the tool body it placed, if any,
+/// and the spinner spans the renderer's own lines carry.
 pub(crate) struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub raw: Vec<RawSpan>,
     pub tool: Option<ToolBody>,
+    pub spinner_lines: Vec<SpinnerLine>,
 }
 
-/// Render objects as ratatui lines plus the raw spans they place. Lines
-/// append their spans; a raw object appends `height` placeholder rows and
-/// records where its sequence goes. A raw sequence that fails validation
-/// refuses the whole block (`None`), so the caller keeps the Rust rendering
-/// and an unsafe sequence can never reach the terminal.
-pub(crate) fn render(objects: &[RenderObject]) -> Option<(Vec<Line<'static>>, Vec<RawSpan>)> {
-    let rendered = render_with_tools(objects, None)?;
-    Some((rendered.lines, rendered.raw))
+/// Render objects as ratatui lines plus the raw spans they place, with no
+/// native tool body available. See [`render_with_tools`].
+pub(crate) fn render(objects: &[RenderObject]) -> Option<Rendered> {
+    render_with_tools(objects, None)
 }
 
 /// [`render`] with the host's native tool body available. At most one
@@ -157,12 +263,33 @@ pub(crate) fn render_with_tools(
 ) -> Option<Rendered> {
     let mut lines = Vec::new();
     let mut raw = Vec::new();
+    let mut spinner_lines = Vec::new();
     let mut tool = tool_lines;
     let mut body = None;
     for object in objects {
         match object {
             RenderObject::Lines(source) => {
-                lines.extend(source.iter().map(snapshot_to_line));
+                for source_line in source {
+                    let line_idx = lines.len();
+                    let mut spans = Vec::with_capacity(source_line.spans.len());
+                    for source_span in &source_line.spans {
+                        match spinner_style_name(&source_span.style) {
+                            Some(style) => {
+                                spinner_lines.push(SpinnerLine {
+                                    line: line_idx,
+                                    span: spans.len(),
+                                    style: style.map(Arc::from),
+                                });
+                                spans.push(spinner_span(style));
+                            }
+                            None => spans.push(Span::styled(
+                                source_span.text.clone(),
+                                resolve_span_style(&source_span.style),
+                            )),
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
             }
             RenderObject::Raw { seq, width, height } => {
                 raw::validate(seq).ok()?;
@@ -189,6 +316,7 @@ pub(crate) fn render_with_tools(
         lines,
         raw,
         tool: body,
+        spinner_lines,
     })
 }
 
@@ -200,7 +328,10 @@ fn place_tool_body(mut tl: ToolLines, offset: usize) -> ToolBody {
     let spinner_lines = tl
         .spinner_lines
         .iter()
-        .map(|(line, span)| (line + offset, *span))
+        .map(|placement| SpinnerLine {
+            line: placement.line + offset,
+            ..placement.clone()
+        })
         .collect();
     ToolBody {
         offset,
@@ -302,7 +433,8 @@ mod tests {
         let objects = vec![RenderObject::Lines(vec![SnapshotLine::plain(
             "a".to_owned(),
         )])];
-        let (lines, raw) = render(&objects).unwrap();
+        let rendered = render(&objects).unwrap();
+        let (lines, raw) = (rendered.lines, rendered.raw);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].content.as_ref(), "a");
         assert!(raw.is_empty());
@@ -318,7 +450,8 @@ mod tests {
                 height: RAW_HEIGHT,
             },
         ];
-        let (lines, raw) = render(&objects).unwrap();
+        let rendered = render(&objects).unwrap();
+        let (lines, raw) = (rendered.lines, rendered.raw);
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].row, 1);
         assert_eq!(raw[0].seq, SGR_RED);
@@ -338,7 +471,8 @@ mod tests {
             width: u16::MAX,
             height: u16::MAX,
         }];
-        let (lines, raw) = render(&objects).unwrap();
+        let rendered = render(&objects).unwrap();
+        let (lines, raw) = (rendered.lines, rendered.raw);
         assert_eq!(raw[0].width, MAX_RAW_WIDTH);
         assert_eq!(raw[0].height, MAX_RAW_HEIGHT);
         assert_eq!(lines.len(), usize::from(MAX_RAW_HEIGHT));
@@ -370,7 +504,7 @@ mod tests {
                     output: 2,
                 },
             }),
-            spinner_lines: vec![(1, 0)],
+            spinner_lines: vec![SpinnerLine::new(1, 0)],
             snapshot_base: Some(1),
             content_indent: "  ",
             truncation: SectionFlags {
@@ -395,7 +529,7 @@ mod tests {
         let body = rendered.tool.expect("tool body");
         assert_eq!(body.offset, 0);
         assert_eq!(body.highlight.expect("highlight").range, (1, 3));
-        assert_eq!(body.spinner_lines, vec![(1, 0)]);
+        assert_eq!(body.spinner_lines, vec![SpinnerLine::new(1, 0)]);
         assert_eq!(body.snapshot_base, Some(1));
         assert!(body.truncation.output);
     }
@@ -412,7 +546,7 @@ mod tests {
         let body = rendered.tool.expect("tool body");
         assert_eq!(body.offset, 1);
         assert_eq!(body.highlight.expect("highlight").range, (2, 4));
-        assert_eq!(body.spinner_lines, vec![(2, 0)]);
+        assert_eq!(body.spinner_lines, vec![SpinnerLine::new(2, 0)]);
         assert_eq!(body.snapshot_base, Some(2));
     }
 

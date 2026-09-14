@@ -17,7 +17,10 @@ pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::pack::{Declared, PackOp};
 pub use api::session::SessionSnapshotFn;
 pub use api::ui::render::{BlockRender, RenderCtx, RenderObject, renderer_generation};
-pub use api::ui::{TranscriptMarkdownFn, set_transcript_markdown};
+pub use api::ui::{
+    RightInfoFn, SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, TranscriptMarkdownFn, set_right_info,
+    set_transcript_markdown, spinner_token,
+};
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,
     HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest, SessionRequest,

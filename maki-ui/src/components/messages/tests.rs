@@ -2945,7 +2945,7 @@ fn lua_block_lines(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
     const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
     const HANDLED: &str = "the built-in ui renderer must handle this block";
 
-    crate::markdown::install_transcript_markdown();
+    crate::markdown::install_render_bridges();
     let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
         .expect("every bundled plugin loads");
     let reply = host.event_handle().request_render_block(
@@ -2960,9 +2960,9 @@ fn lua_block_lines(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
     else {
         panic!("{HANDLED}");
     };
-    let (lines, raw) = block::render(&objects).expect("valid render objects");
-    assert!(raw.is_empty());
-    lines
+    let rendered = block::render(&objects).expect("valid render objects");
+    assert!(rendered.raw.is_empty());
+    rendered.lines
 }
 
 /// Render objects for a block, with an optional extra renderer layered on top
@@ -2975,7 +2975,7 @@ fn block_objects(
     const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
     const NO_OBJECTS: &str = "the renderer chain must produce objects";
 
-    crate::markdown::install_transcript_markdown();
+    crate::markdown::install_render_bridges();
     let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
         .expect("every bundled plugin loads");
     if let Some(source) = fixture {
@@ -3008,47 +3008,133 @@ fn tool_message() -> DisplayMessage {
     message
 }
 
+fn tool_message_with(
+    status: ToolStatus,
+    annotation: Option<&str>,
+    usage: Option<&str>,
+    timestamp: Option<&str>,
+) -> DisplayMessage {
+    let mut message = tool_message();
+    let DisplayRole::Tool(tool) = &mut message.role else {
+        unreachable!("tool_message builds a tool role")
+    };
+    tool.status = status;
+    message.annotation = annotation.map(str::to_owned);
+    message.turn_usage = usage.map(str::to_owned);
+    message.timestamp = timestamp.map(str::to_owned);
+    message
+}
+
+/// The full native tool render the Lua renderer has to reproduce: header,
+/// indicator, right-info and body.
 fn native_tool_lines(
     message: &DisplayMessage,
+    status: ToolStatus,
     width: u16,
-) -> (
-    Vec<Line<'static>>,
-    crate::components::tool_display::ToolLines,
-) {
+) -> crate::components::tool_display::ToolLines {
     let output_lines = maki_config::ToolOutputLines::default();
     let rctx = crate::components::tool_display::RenderCtx {
         started_at: Instant::now(),
         width,
         tool_output_lines: &output_lines,
     };
-    let native = MessagesPanel::build_tool_segment_lines(
+    MessagesPanel::build_tool_segment_lines(message, status, &rctx, SectionFlags::default())
+}
+
+/// The renderer chain's objects with the host's body-only lines placed, so the
+/// Lua-composed header and the native body can be compared to the native whole.
+fn lua_tool_render(
+    message: &DisplayMessage,
+    status: ToolStatus,
+    width: u16,
+    fixture: Option<&str>,
+) -> block::Rendered {
+    let objects = block_objects(message, width, fixture);
+    let output_lines = maki_config::ToolOutputLines::default();
+    let rctx = crate::components::tool_display::RenderCtx {
+        started_at: Instant::now(),
+        width,
+        tool_output_lines: &output_lines,
+    };
+    let body = crate::components::tool_display::build_tool_body(
         message,
-        ToolStatus::Success,
+        status,
         &rctx,
         SectionFlags::default(),
     );
-    (native.lines.clone(), native)
+    block::render_with_tools(&objects, Some(body))
+        .expect("the bundled plugin places the native body")
 }
 
-/// The host's native tool body must survive the Lua round trip untouched:
-/// same lines, same metadata, no matter that a renderer placed it.
-#[test]
-fn lua_tool_renderer_places_the_native_body_unchanged() {
-    const WIDTH: u16 = 80;
+/// The glyph the panel substitutes on every tick, so a dynamic frame never
+/// makes parity flaky.
+const TOOL_GLYPH: &str = "⠋ ";
+
+fn with_spinners(
+    lines: Vec<Line<'static>>,
+    spinners: &[crate::components::tool_display::SpinnerLine],
+    glyph: &'static str,
+) -> Vec<Line<'static>> {
+    let mut seg = segment::Segment::default();
+    seg.set_lines(lines);
+    seg.spinner_lines = spinners.to_vec();
+    seg.update_spinners(glyph);
+    seg.lines().to_vec()
+}
+
+/// The renderer's own spinner placements plus the native body's, in final
+/// coordinates.
+fn rendered_spinners(
+    rendered: &block::Rendered,
+) -> Vec<crate::components::tool_display::SpinnerLine> {
+    let mut spinners = rendered.spinner_lines.clone();
+    if let Some(body) = &rendered.tool {
+        spinners.extend(body.spinner_lines.iter().cloned());
+    }
+    spinners
+}
+
+/// A Lua-composed render normalized to the fixed repaint glyph.
+fn composed(rendered: block::Rendered) -> Vec<Line<'static>> {
+    let spinners = rendered_spinners(&rendered);
+    with_spinners(rendered.lines, &spinners, TOOL_GLYPH)
+}
+
+fn assert_tool_parity(message: &DisplayMessage, status: ToolStatus, width: u16) {
+    let native = native_tool_lines(message, status, width);
+    let rendered = lua_tool_render(message, status, width, None);
+    assert_eq!(
+        composed(rendered),
+        with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+        "status={status:?} width={width}"
+    );
+}
+
+/// The Lua-composed indicator, prefix, header text, annotation and right-info
+/// must land on exactly the native lines, at any width and for both finished
+/// statuses.
+#[test_case(24 ; "narrow")]
+#[test_case(80 ; "wide")]
+#[test_case(200 ; "extra_wide")]
+fn lua_tool_header_matches_native_across_widths(width: u16) {
     const THEME: &str = "dracula";
     theme::set(theme::load_by_name(THEME).expect(THEME));
-    let message = tool_message();
-    let (expected, native) = native_tool_lines(&message, WIDTH);
-    let objects = block_objects(&message, WIDTH, None);
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody)),
-        "the bundled plugin must ask for the native tool body"
-    );
-    let rendered = block::render_with_tools(&objects, Some(native)).expect("body placed");
-    assert_eq!(rendered.lines, expected);
-    assert_eq!(rendered.tool.expect("tool body").offset, 0);
+    for status in [ToolStatus::Success, ToolStatus::Error] {
+        let message = tool_message_with(status, Some("12 files"), Some("1.2k"), Some("12:00"));
+        assert_tool_parity(&message, status, width);
+    }
+}
+
+/// An in-progress header carries the semantic spinner, which the panel
+/// repaints per tick; the composed lines must still match the native ones.
+#[test]
+fn lua_tool_in_progress_header_matches_native() {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    for width in [24, 80, 200] {
+        let message = tool_message_with(ToolStatus::InProgress, None, None, None);
+        assert_tool_parity(&message, ToolStatus::InProgress, width);
+    }
 }
 
 const TOOL_WRAP_FIXTURE: &str = r#"
@@ -3056,26 +3142,127 @@ maki.ui.set_block_renderer(function(prev, block, ctx)
   if block.kind ~= "tool" then
     return prev(block, ctx)
   end
-  return { "above", maki.ui.transcript_tool(), "below" }
+  local out = prev(block, ctx)
+  table.insert(out, 1, { { "above", "dim" } })
+  out[#out + 1] = { { "below", "dim" } }
+  return out
 end)
 "#;
 
 /// Lua positions the body: the host shifts the body's highlight, spinner and
-/// snapshot offsets by the lines Lua put above it.
+/// snapshot offsets past the lines Lua put above it, while the outer design
+/// still matches the native lines in place.
 #[test]
-fn lua_tool_renderer_can_compose_around_the_native_body() {
-    const WIDTH: u16 = 80;
+fn lua_tool_composed_header_parity_survives_a_wrapper() {
     const THEME: &str = "dracula";
     theme::set(theme::load_by_name(THEME).expect(THEME));
-    let message = tool_message();
-    let (expected, native) = native_tool_lines(&message, WIDTH);
-    let objects = block_objects(&message, WIDTH, Some(TOOL_WRAP_FIXTURE));
-    let rendered = block::render_with_tools(&objects, Some(native)).expect("body placed");
-    let body = rendered.tool.expect("tool body");
-    assert_eq!(body.offset, 1);
-    assert_eq!(rendered.lines.len(), expected.len() + 2);
-    assert_eq!(rendered.lines[0].spans[0].content.as_ref(), "above");
-    assert_eq!(&rendered.lines[1..1 + expected.len()], expected.as_slice());
+    let message = tool_message_with(ToolStatus::Success, Some("a"), Some("1.2k"), Some("12:00"));
+    let native = native_tool_lines(&message, ToolStatus::Success, 80);
+    let rendered = lua_tool_render(&message, ToolStatus::Success, 80, Some(TOOL_WRAP_FIXTURE));
+    assert_eq!(
+        rendered.tool.as_ref().expect("body placed").offset,
+        2,
+        "the body sits under the wrapper's line and the bundled header"
+    );
+
+    let plain = |text: &str| Line::from(Span::styled(text.to_owned(), theme::style_by_name("dim")));
+    let mut expected = Vec::with_capacity(native.lines.len() + 2);
+    expected.push(plain("above"));
+    expected.extend(native.lines.clone());
+    expected.push(plain("below"));
+    let shifted: Vec<_> = native
+        .spinner_lines
+        .iter()
+        .map(|placement| crate::components::tool_display::SpinnerLine {
+            line: placement.line + 1,
+            ..placement.clone()
+        })
+        .collect();
+    assert_eq!(
+        composed(rendered),
+        with_spinners(expected, &shifted, TOOL_GLYPH),
+    );
+}
+
+/// A snapshot header, with a dynamic spinner token and an ordinary custom
+/// styled span, must match the native output and keep the token animatable.
+#[test]
+fn lua_tool_snapshot_header_matches_native() {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    let mut message = tool_message_with(
+        ToolStatus::InProgress,
+        None,
+        Some("10 tokens"),
+        Some("12:00"),
+    );
+    message.render_header = Some(BufferSnapshot {
+        lines: Arc::new(vec![SnapshotLine {
+            spans: vec![
+                SnapshotSpan {
+                    text: "3 tools ".into(),
+                    style: SpanStyle::Default,
+                },
+                SnapshotSpan {
+                    text: "· ".into(),
+                    style: SpanStyle::Named("spinner".into()),
+                },
+                SnapshotSpan {
+                    text: "custom".into(),
+                    style: SpanStyle::Named("diff_new".into()),
+                },
+            ],
+        }]),
+    });
+    let native = native_tool_lines(&message, ToolStatus::InProgress, 80);
+    let rendered = lua_tool_render(&message, ToolStatus::InProgress, 80, None);
+    assert!(
+        rendered
+            .spinner_lines
+            .iter()
+            .any(|placement| placement.line == 0 && placement.span > 0),
+        "the snapshot header's spinner token must stay animatable"
+    );
+    assert_eq!(
+        composed(rendered),
+        with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+    );
+}
+
+/// A spinner repaint is host-side substitution only: it never bumps the
+/// segment revision, so a cached render is not requested again across ticks.
+#[test]
+fn spinner_ticks_do_not_re_request_a_cached_render() {
+    use super::block_render::{BlockId, BlockRenderCache, RenderKey};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let key = RenderKey {
+        width: 80,
+        theme_gen: 1,
+        mode: Arc::from("build"),
+        generation: 1,
+    };
+    let id = BlockId::new(0);
+    let mut cache = BlockRenderCache::default();
+    let requests = Arc::new(AtomicUsize::new(0));
+    for _ in 0..4 {
+        let count = Arc::clone(&requests);
+        cache.request(
+            id,
+            1,
+            serde_json::json!({ "kind": "tool" }),
+            key.clone(),
+            move |_, _| {
+                count.fetch_add(1, Ordering::Relaxed);
+                flume::unbounded().1
+            },
+        );
+    }
+    assert_eq!(
+        requests.load(Ordering::Relaxed),
+        1,
+        "the cached render must be requested exactly once"
+    );
 }
 
 /// The bundled `ui` plugin owns `done` now, so its render objects must land on

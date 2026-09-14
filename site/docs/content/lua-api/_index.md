@@ -5056,6 +5056,69 @@ end)
 
 ---
 
+### `maki.ui.spinner()` {#maki-ui-spinner}
+
+```lua
+maki.ui.spinner({style?})
+```
+
+Returns a span that the host paints with the live spinner glyph, for use
+inside any line of spans, e.g. an in-progress tool's leading indicator.
+
+The span carries empty text and the semantic `{spinner = ...}` style, so it
+can sit anywhere a `{text, style}` span can and the host substitutes the
+glyph on every tick without a re-render. `style` names the theme style the
+glyph is drawn in; omit it for the theme's spinner style.
+
+**Parameters:**
+
+- `{style?}` (`string|nil`) Theme style name for the glyph, e.g. "tool_dim".
+
+**Returns:** (`table`) A span `{ "", { spinner = style } }`.
+
+**Example:**
+
+```lua
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  return { { maki.ui.spinner(), "working" } }
+end)
+```
+
+---
+
+### `maki.ui.right_info()` {#maki-ui-right_info}
+
+```lua
+maki.ui.right_info({spans}, {usage?}, {timestamp?}, {width})
+```
+
+Appends the host's right-aligned `usage`/`timestamp` tail to a line of
+spans, using exactly the transcript's placement rule, and returns the same
+table. The padding accounts for `spans`' display width, so call it after
+the header's spans are assembled and before the line is returned.
+
+Unavailable when the host installs no builder, in which case it appends
+nothing. `usage` is measured in display cells and `timestamp` in bytes,
+matching the transcript.
+
+**Parameters:**
+
+- `{spans}` (`table`) The line's spans, mutated in place.
+- `{usage?}` (`string|nil`) Usage text, e.g. "1.2k tokens".
+- `{timestamp?}` (`string|nil`) Timestamp text, e.g. "12:00".
+- `{width}` (`integer`) Header width in cells, > 0.
+
+**Returns:** (`table`) The same `spans` table.
+
+**Example:**
+
+```lua
+local spans = { { "bash> ls", "tool" } }
+maki.ui.right_info(spans, "10 tokens", "12:00", ctx.width)
+```
+
+---
+
 ### `maki.ui.highlight()` {#maki-ui-highlight}
 
 ```lua

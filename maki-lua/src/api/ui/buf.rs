@@ -10,6 +10,16 @@ use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 use super::{blit, segment_color_to_lua};
 use crate::runtime::{TaskHandle, lock_cell};
 
+/// The `SpanStyle::Named` marker the host animates. Lua never spells it: the
+/// public grammar is `maki.ui.spinner` and the `{spinner = name}` span form.
+/// These strings are the internal convention shared with the UI's native tool
+/// renderer, so both sides agree without Lua seeing them.
+pub const SPINNER_STYLE_NAME: &str = "spinner";
+pub const SPINNER_STYLE_PREFIX: &str = "spinner:";
+
+/// Cells a baked spinner glyph occupies (glyph plus its trailing space).
+pub(crate) const SPINNER_CELL_WIDTH: usize = 2;
+
 /// `live_buf` tracks the first buffer a handler creates, the one
 /// that gets streamed to the UI during execution.
 pub(crate) struct BufferStore {
@@ -429,6 +439,10 @@ pub(crate) fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
             Ok(SpanStyle::Named(name))
         }
         LuaValue::Table(t) => {
+            if let Ok(LuaValue::String(s)) = t.raw_get::<LuaValue>("spinner") {
+                let name = s.to_str().map_err(mlua::Error::external)?;
+                return Ok(spinner_named(&name));
+            }
             let mut inline = InlineStyle::default();
             if let Ok(LuaValue::String(s)) = t.raw_get::<LuaValue>("fg") {
                 inline.fg = parse_span_color(&s.to_str().map_err(mlua::Error::external)?);
@@ -457,6 +471,24 @@ pub(crate) fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
     }
 }
 
+fn spinner_named(name: &str) -> SpanStyle {
+    if name == SPINNER_STYLE_NAME {
+        SpanStyle::Named(SPINNER_STYLE_NAME.to_owned())
+    } else {
+        SpanStyle::Named(format!("{SPINNER_STYLE_PREFIX}{name}"))
+    }
+}
+
+/// The Lua-visible token for an internal spinner marker: the bare `spinner`
+/// for the default style, the style name for `spinner:<style>`.
+pub fn spinner_token(name: &str) -> Option<&str> {
+    if name == SPINNER_STYLE_NAME {
+        Some(SPINNER_STYLE_NAME)
+    } else {
+        name.strip_prefix(SPINNER_STYLE_PREFIX)
+    }
+}
+
 pub(crate) fn line_to_lua(lua: &Lua, line: &SnapshotLine) -> LuaResult<Table> {
     let tbl = lua.create_table_with_capacity(line.spans.len(), 0)?;
     for (i, span) in line.spans.iter().enumerate() {
@@ -465,12 +497,19 @@ pub(crate) fn line_to_lua(lua: &Lua, line: &SnapshotLine) -> LuaResult<Table> {
     Ok(tbl)
 }
 
-fn span_to_lua(lua: &Lua, span: &SnapshotSpan) -> LuaResult<Table> {
+pub(crate) fn span_to_lua(lua: &Lua, span: &SnapshotSpan) -> LuaResult<Table> {
     let tbl = lua.create_table_with_capacity(2, 0)?;
     tbl.raw_set(1, span.text.as_str())?;
     match &span.style {
         SpanStyle::Default => {}
-        SpanStyle::Named(name) => tbl.raw_set(2, name.as_str())?,
+        SpanStyle::Named(name) => match spinner_token(name) {
+            Some(token) => {
+                let style = lua.create_table_with_capacity(0, 1)?;
+                style.raw_set("spinner", token)?;
+                tbl.raw_set(2, style)?;
+            }
+            None => tbl.raw_set(2, name.as_str())?,
+        },
         SpanStyle::Inline(inline) => tbl.raw_set(2, inline_to_lua(lua, inline)?)?,
     }
     Ok(tbl)
@@ -732,6 +771,32 @@ mod tests {
         let t = lua.create_table().unwrap();
         let style = parse_style(&LuaValue::Table(t)).unwrap();
         assert_eq!(style, SpanStyle::Inline(InlineStyle::default()));
+    }
+
+    #[test_case("spinner", SpanStyle::Named("spinner".into()) ; "default")]
+    #[test_case("tool_dim", SpanStyle::Named("spinner:tool_dim".into()) ; "named")]
+    fn spinner_style_table_parses_to_the_internal_marker(name: &str, expected: SpanStyle) {
+        let lua = test_lua();
+        let t = lua.create_table().unwrap();
+        t.raw_set("spinner", name).unwrap();
+        assert_eq!(parse_style(&LuaValue::Table(t)).unwrap(), expected);
+    }
+
+    #[test_case(SpanStyle::Named("spinner".into()), "spinner" ; "default")]
+    #[test_case(SpanStyle::Named("spinner:tool_dim".into()), "tool_dim" ; "named")]
+    fn spinner_marker_round_trips_through_lua(style: SpanStyle, expected_token: &str) {
+        let lua = test_lua();
+        let span = SnapshotSpan {
+            text: String::new(),
+            style: style.clone(),
+        };
+        let tbl = span_to_lua(&lua, &span).unwrap();
+        let semantic: Table = tbl.raw_get(2).unwrap();
+        assert_eq!(
+            semantic.raw_get::<String>("spinner").unwrap(),
+            expected_token
+        );
+        assert_eq!(parse_style(&LuaValue::Table(semantic)).unwrap(), style);
     }
 
     #[test]

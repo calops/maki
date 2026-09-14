@@ -270,10 +270,11 @@ pub(crate) fn transcript_markdown(
     .collect()
 }
 
-/// Installs [`transcript_markdown`] for the Lua primitive. A once-off at UI
-/// startup; headless hosts leave the slot unset.
-pub(crate) fn install_transcript_markdown() {
+/// Installs the host bridges behind the Lua render primitives. A once-off at
+/// UI startup; headless hosts leave the slots unset.
+pub(crate) fn install_render_bridges() {
     maki_lua::set_transcript_markdown(transcript_markdown);
+    maki_lua::set_right_info(crate::components::tool_display::right_info_spans);
 }
 
 fn snapshot_line(line: &Line<'static>) -> SnapshotLine {
@@ -289,7 +290,7 @@ fn snapshot_line(line: &Line<'static>) -> SnapshotLine {
     }
 }
 
-fn snapshot_style(style: Style) -> InlineStyle {
+pub(crate) fn snapshot_style(style: Style) -> InlineStyle {
     let on = |m| style.add_modifier.contains(m) && !style.sub_modifier.contains(m);
     InlineStyle {
         fg: style.fg.map(snapshot_color),

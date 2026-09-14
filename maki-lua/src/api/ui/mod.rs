@@ -4,11 +4,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use humantime::format_duration;
-use maki_agent::{SnapshotLine, SpanStyle};
+use maki_agent::{SnapshotLine, SnapshotSpan, SpanStyle};
 use maki_highlight::{DEFAULT_COLOR_NAME, SegmentColor};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, Result as LuaResult, Table, Value};
 use strum::VariantNames;
+use unicode_width::UnicodeWidthStr;
 
 use crate::api::util::command::{
     Anchor, Border, BuiltinAction, Dimension, FloatConfig, HintEntries, HintWriter, Split,
@@ -22,6 +23,8 @@ pub(crate) mod buf;
 pub(crate) mod render;
 pub(crate) mod win;
 pub(crate) mod wrap;
+
+pub use buf::{SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, spinner_token};
 
 use crate::runtime::with_task_bufs;
 use render::set_block_renderer__doc;
@@ -249,6 +252,109 @@ fn transcript_tool(lua: &Lua) -> LuaResult<Table> {
     let object = lua.create_table_with_capacity(1, 0)?;
     object.raw_set("tool", true)?;
     Ok(object)
+}
+
+/// Returns a span that the host paints with the live spinner glyph, for use
+/// inside any line of spans, e.g. an in-progress tool's leading indicator.
+///
+/// The span carries empty text and the semantic `{spinner = ...}` style, so it
+/// can sit anywhere a `{text, style}` span can and the host substitutes the
+/// glyph on every tick without a re-render. `style` names the theme style the
+/// glyph is drawn in; omit it for the theme's spinner style.
+///
+/// @param style string|nil Theme style name for the glyph, e.g. "tool_dim".
+/// @return (table) A span `{ "", { spinner = style } }`.
+/// @example
+/// maki.ui.set_block_renderer(function(prev, block, ctx)
+///   return { { maki.ui.spinner(), "working" } }
+/// end)
+#[lua_fn]
+fn spinner(lua: &Lua, style: Option<String>) -> LuaResult<Table> {
+    let span = lua.create_table_with_capacity(2, 0)?;
+    span.raw_set(1, "")?;
+    let style_table = lua.create_table_with_capacity(0, 1)?;
+    style_table.raw_set(
+        "spinner",
+        style.unwrap_or_else(|| buf::SPINNER_STYLE_NAME.to_owned()),
+    )?;
+    span.raw_set(2, style_table)?;
+    Ok(span)
+}
+
+/// The host's native right-info builder, installed at UI startup.
+pub type RightInfoFn = fn(usize, Option<&str>, Option<&str>, u16) -> Vec<SnapshotSpan>;
+
+static RIGHT_INFO: OnceLock<RightInfoFn> = OnceLock::new();
+
+/// Installs the builder behind `maki.ui.right_info`. Headless hosts leave it
+/// unset, and the primitive then appends nothing.
+pub fn set_right_info(builder: RightInfoFn) {
+    let _ = RIGHT_INFO.set(builder);
+}
+
+/// Appends the host's right-aligned `usage`/`timestamp` tail to a line of
+/// spans, using exactly the transcript's placement rule, and returns the same
+/// table. The padding accounts for `spans`' display width, so call it after
+/// the header's spans are assembled and before the line is returned.
+///
+/// Unavailable when the host installs no builder, in which case it appends
+/// nothing. `usage` is measured in display cells and `timestamp` in bytes,
+/// matching the transcript.
+///
+/// @param spans table The line's spans, mutated in place.
+/// @param usage string|nil Usage text, e.g. "1.2k tokens".
+/// @param timestamp string|nil Timestamp text, e.g. "12:00".
+/// @param width integer Header width in cells, > 0.
+/// @return (table) The same `spans` table.
+/// @example
+/// local spans = { { "bash> ls", "tool" } }
+/// maki.ui.right_info(spans, "10 tokens", "12:00", ctx.width)
+#[lua_fn]
+fn right_info(
+    lua: &Lua,
+    spans: Table,
+    usage: Option<String>,
+    timestamp: Option<String>,
+    width: Value,
+) -> LuaResult<Table> {
+    let Some(build) = RIGHT_INFO.get() else {
+        return Ok(spans);
+    };
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let mut header_width = 0;
+    for i in 1..=spans.raw_len() {
+        header_width += span_display_width(&spans.raw_get::<Value>(i)?)?;
+    }
+    for span in build(header_width, usage.as_deref(), timestamp.as_deref(), width) {
+        let idx = spans.raw_len() + 1;
+        spans.raw_set(idx, buf::span_to_lua(lua, &span)?)?;
+    }
+    Ok(spans)
+}
+
+/// A span's contribution to a header's display width. A semantic spinner
+/// carries no text but the host paints a fixed-width glyph, so it counts as
+/// its baked width rather than zero.
+fn span_display_width(span: &Value) -> LuaResult<usize> {
+    let Value::Table(t) = span else {
+        return Ok(0);
+    };
+    if is_spinner_span(t) {
+        return Ok(buf::SPINNER_CELL_WIDTH);
+    }
+    let Value::String(s) = t.raw_get::<Value>(1)? else {
+        return Ok(0);
+    };
+    Ok(UnicodeWidthStr::width(
+        s.to_str().map_err(mlua::Error::external)?.as_ref(),
+    ))
+}
+
+fn is_spinner_span(t: &Table) -> bool {
+    let Ok(Value::Table(style)) = t.raw_get::<Value>(2) else {
+        return false;
+    };
+    style.raw_get::<Value>("spinner").is_ok_and(|v| !v.is_nil())
 }
 
 /// Syntax-highlights a chunk of source code. Returns a table of styled
@@ -736,7 +842,8 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_tool, highlight, markdown,
+        buf, theme_color, theme_style, transcript_markdown, transcript_tool, spinner, right_info,
+        highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
@@ -1687,6 +1794,49 @@ mod tests {
         let lua = ui_lua();
         let object: Table = lua.load("return ui.transcript_tool()").eval().unwrap();
         assert!(object.get::<bool>("tool").unwrap());
+    }
+
+    #[test_case("", SPINNER_STYLE_NAME ; "default")]
+    #[test_case(r#""tool_dim""#, "tool_dim" ; "named")]
+    fn spinner_returns_the_semantic_span(argument: &str, expected: &str) {
+        let lua = ui_lua();
+        let span: Table = lua
+            .load(format!("return ui.spinner({argument})"))
+            .eval()
+            .unwrap();
+        assert_eq!(span.raw_get::<String>(1).unwrap(), "");
+        let style: Table = span.raw_get(2).unwrap();
+        assert_eq!(style.raw_get::<String>("spinner").unwrap(), expected);
+    }
+
+    #[test]
+    fn right_info_appends_the_host_tail_of_the_measured_width() {
+        fn build(
+            header_width: usize,
+            usage: Option<&str>,
+            timestamp: Option<&str>,
+            width: u16,
+        ) -> Vec<SnapshotSpan> {
+            vec![SnapshotSpan {
+                text: format!("[{header_width}|{usage:?}|{timestamp:?}|{width}]"),
+                style: SpanStyle::Default,
+            }]
+        }
+        let _ = RIGHT_INFO.set(build);
+        let lua = ui_lua();
+        let spans: Table = lua
+            .load(
+                r#"local s = { { "hi" }, ui.spinner() }; ui.right_info(s, "u", "t", 40); return s"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(spans.raw_len(), 3, "the tail appends one span");
+        let tail: Table = spans.raw_get(3).unwrap();
+        assert_eq!(
+            tail.raw_get::<String>(1).unwrap(),
+            "[4|Some(\"u\")|Some(\"t\")|40]",
+            "the header spinner must count as its baked width"
+        );
     }
 
     #[test]

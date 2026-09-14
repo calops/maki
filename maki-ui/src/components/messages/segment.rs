@@ -7,7 +7,7 @@ use maki_providers::ImageSource;
 use std::sync::Arc;
 
 use super::super::code_view::SectionFlags;
-use super::super::tool_display::{HighlightRequest, ToolLines};
+use super::super::tool_display::{HighlightRequest, SPINNER_STYLE_NAME, SpinnerLine, ToolLines};
 use super::block::{RawSpan, ToolBody};
 use super::block_render::RenderKey;
 use ratatui::text::{Line, Span};
@@ -79,7 +79,7 @@ pub(super) struct Segment {
     pending_highlight: Option<u64>,
     highlight_range: Option<(usize, usize)>,
     highlight_key: HighlightKey,
-    pub spinner_lines: Vec<(usize, usize)>,
+    pub spinner_lines: Vec<SpinnerLine>,
     snapshot_base: Option<usize>,
     pub content_indent: &'static str,
     /// The render this segment already drew, so `tick` does not rebuild a tool
@@ -138,9 +138,15 @@ impl Segment {
     /// renderer's output. `None` returns to the Rust-built lines. Does not
     /// bump the revision: this is the render result for the current one,
     /// not a content change.
-    pub fn set_lua_render(&mut self, lines: Option<Vec<Line<'static>>>, raw: Vec<RawSpan>) {
+    pub fn set_lua_render(
+        &mut self,
+        lines: Option<Vec<Line<'static>>>,
+        raw: Vec<RawSpan>,
+        spinner_lines: Vec<SpinnerLine>,
+    ) {
         self.lua_lines = lines;
         self.raw = raw;
+        self.spinner_lines = spinner_lines;
         self.invalidate_height();
     }
 
@@ -247,12 +253,14 @@ impl Segment {
         self.cached_height.set(None);
     }
 
-    pub fn update_spinners(&mut self, span: &Span<'static>) {
-        for (line_idx, span_idx) in self.spinner_lines.clone() {
-            if let Some(line) = self.active_lines_mut().get_mut(line_idx)
-                && line.spans.len() > span_idx
+    pub fn update_spinners(&mut self, glyph: &'static str) {
+        for placement in self.spinner_lines.clone() {
+            let style =
+                theme::style_by_name(placement.style.as_deref().unwrap_or(SPINNER_STYLE_NAME));
+            if let Some(line) = self.active_lines_mut().get_mut(placement.line)
+                && line.spans.len() > placement.span
             {
-                line.spans[span_idx] = span.clone();
+                line.spans[placement.span] = Span::styled(glyph, style);
             }
         }
     }
@@ -328,6 +336,7 @@ impl Segment {
     pub fn apply_tool_render(
         &mut self,
         mut lines: Vec<Line<'static>>,
+        mut spinner_lines: Vec<SpinnerLine>,
         body: ToolBody,
         worker: &RenderWorker,
     ) {
@@ -355,7 +364,8 @@ impl Segment {
         self.highlight_range = reused.or(range);
         self.highlight_key = key;
         self.truncation = body.truncation;
-        self.spinner_lines = body.spinner_lines;
+        spinner_lines.extend(body.spinner_lines.iter().cloned());
+        self.spinner_lines = spinner_lines;
         self.snapshot_base = body.snapshot_base;
         self.content_indent = body.content_indent;
         self.lua_lines = Some(lines);
@@ -399,8 +409,8 @@ impl Segment {
                 *v = v.saturating_add_signed(delta);
             }
         };
-        for (line, _) in &mut self.spinner_lines {
-            shift(line);
+        for placement in &mut self.spinner_lines {
+            shift(&mut placement.line);
         }
         if let Some(base) = &mut self.snapshot_base {
             shift(base);
@@ -638,13 +648,16 @@ mod tests {
     fn highlight_splice_shifts_spinners_and_base(replacement_lines: usize, expected_base: usize) {
         let mut seg = seg_with_base(8, Some(4));
         seg.highlight_range = Some((1, 3));
-        seg.spinner_lines = vec![(0, 0), (5, 1)];
+        seg.spinner_lines = vec![SpinnerLine::new(0, 0), SpinnerLine::new(5, 1)];
         seg.apply_highlight_result((0..replacement_lines).map(|_| Line::raw("hl")).collect());
         let delta = expected_base as isize - 4;
         assert_eq!(seg.snapshot_base, Some(expected_base));
         assert_eq!(
             seg.spinner_lines,
-            vec![(0, 0), (5usize.saturating_add_signed(delta), 1)],
+            vec![
+                SpinnerLine::new(0, 0),
+                SpinnerLine::new(5usize.saturating_add_signed(delta), 1)
+            ],
             "positions before the splice stay, after it shift by the delta"
         );
     }
@@ -663,7 +676,7 @@ mod tests {
         let mut seg = Segment::with_lines(vec![Line::raw("a"), Line::raw("b")], Some(0));
         assert_eq!(seg.lines().len(), 2);
         let revision = seg.revision();
-        seg.set_lua_render(Some(vec![Line::raw("only")]), vec![raw_span()]);
+        seg.set_lua_render(Some(vec![Line::raw("only")]), vec![raw_span()], Vec::new());
         assert_eq!(seg.lines().len(), 1);
         assert!(seg.has_lua_lines());
         assert_eq!(seg.raw().len(), 1);
@@ -677,7 +690,7 @@ mod tests {
     #[test]
     fn set_lines_clears_raw_placements() {
         let mut seg = Segment::with_lines(vec![Line::raw("a")], Some(0));
-        seg.set_lua_render(Some(vec![Line::raw("b")]), vec![raw_span()]);
+        seg.set_lua_render(Some(vec![Line::raw("b")]), vec![raw_span()], Vec::new());
         seg.set_lines(vec![Line::raw("c")]);
         assert!(seg.raw().is_empty());
     }

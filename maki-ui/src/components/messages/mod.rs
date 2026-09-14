@@ -19,14 +19,14 @@ use self::segment::{Segment, SegmentCache};
 
 use super::tool_display::{
     RenderCtx, RoleStyle, ToolLines, append_annotation, append_right_info, assistant_style,
-    build_instructions_lines, build_tool_lines, done_style, error_style, format_timestamp_now,
-    instructions_search_text, search_text_for, thinking_indicator, thinking_style,
-    truncate_to_header, user_style,
+    build_instructions_lines, build_tool_body, build_tool_lines, done_style, error_style,
+    format_timestamp_now, instructions_search_text, search_text_for, thinking_indicator,
+    thinking_style, truncate_to_header, user_style,
 };
 use super::{
     DisplayMessage, DisplayRole, IMAGE_PLACEHOLDER, ToolRole, ToolStatus, code_view::SectionFlags,
 };
-use crate::animation::spinner_str;
+use crate::animation::spinner_glyph;
 use crate::components::keybindings::key;
 use crate::markdown::{hr_line, plain_lines, text_to_lines, truncate_output};
 use crate::render_worker::RenderWorker;
@@ -931,7 +931,7 @@ impl MessagesPanel {
             }
             let Some(objects) = block_render.objects(id, revision, &key) else {
                 if segment.has_lua_lines() {
-                    segment.set_lua_render(None, Vec::new());
+                    segment.set_lua_render(None, Vec::new(), Vec::new());
                 }
                 continue;
             };
@@ -941,16 +941,24 @@ impl MessagesPanel {
             let applied = match &message.role {
                 DisplayRole::Tool(tool) => {
                     let expanded = expanded_tools.get(&tool.id).copied().unwrap_or_default();
-                    let tool_lines =
-                        Self::build_tool_segment_lines(message, tool.status, &rctx, expanded);
-                    match block::render_with_tools(objects, Some(tool_lines)) {
+                    let body_lines = build_tool_body(message, tool.status, &rctx, expanded);
+                    match block::render_with_tools(objects, Some(body_lines)) {
                         Some(rendered) => match rendered.tool {
                             Some(body) => {
-                                segment.apply_tool_render(rendered.lines, body, hl_worker);
+                                segment.apply_tool_render(
+                                    rendered.lines,
+                                    rendered.spinner_lines,
+                                    body,
+                                    hl_worker,
+                                );
                                 true
                             }
                             None => {
-                                segment.set_lua_render(Some(rendered.lines), rendered.raw);
+                                segment.set_lua_render(
+                                    Some(rendered.lines),
+                                    rendered.raw,
+                                    rendered.spinner_lines,
+                                );
                                 true
                             }
                         },
@@ -958,8 +966,12 @@ impl MessagesPanel {
                     }
                 }
                 _ => match block::render(objects) {
-                    Some((lines, raw)) => {
-                        segment.set_lua_render(Some(lines), raw);
+                    Some(rendered) => {
+                        segment.set_lua_render(
+                            Some(rendered.lines),
+                            rendered.raw,
+                            rendered.spinner_lines,
+                        );
                         true
                     }
                     None => Self::reset_unrenderable(segment),
@@ -976,7 +988,7 @@ impl MessagesPanel {
     /// its Rust rendering instead of keeping a stale frame.
     fn reset_unrenderable(segment: &mut Segment) -> bool {
         if segment.has_lua_lines() {
-            segment.set_lua_render(None, Vec::new());
+            segment.set_lua_render(None, Vec::new(), Vec::new());
         }
         false
     }
@@ -1627,12 +1639,9 @@ impl MessagesPanel {
     }
 
     fn update_spinners(&mut self) {
-        let spinner_span = Span::styled(
-            spinner_str(self.started_at.elapsed().as_millis()),
-            theme::current().spinner,
-        );
+        let glyph = spinner_glyph(self.started_at.elapsed().as_millis());
         for seg in self.cache.segments_mut() {
-            seg.update_spinners(&spinner_span);
+            seg.update_spinners(glyph);
         }
     }
 

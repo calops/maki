@@ -1,7 +1,7 @@
 use super::{DisplayMessage, ToolStatus};
 
 use super::code_view;
-use crate::animation::{spinner_frame, spinner_str};
+use crate::animation::{spinner_frame, spinner_glyph, spinner_str};
 use crate::theme;
 use code_view::RenderLimits;
 use code_view::SectionFlags;
@@ -17,7 +17,10 @@ use unicode_width::UnicodeWidthStr;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
-use crate::markdown::{should_truncate, text_to_lines, truncate_output, truncation_notice};
+use crate::markdown::{
+    should_truncate, snapshot_style, text_to_lines, truncate_output, truncation_notice,
+};
+use maki_agent::types::InlineStyle;
 use maki_agent::{
     BufferSnapshot, InstructionBlock, SnapshotSpan, SpanColor, SpanStyle, ToolInput, ToolOutput,
 };
@@ -25,6 +28,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::render_worker::RenderWorker;
+
+pub(crate) use maki_lua::{SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, spinner_token};
 
 pub struct RenderCtx<'a> {
     pub started_at: Instant,
@@ -34,8 +39,8 @@ pub struct RenderCtx<'a> {
 
 pub const TOOL_INDICATOR: &str = "● ";
 pub const TOOL_BODY_INDENT: &str = "  ";
-pub(crate) const SPINNER_STYLE_NAME: &str = "spinner";
-pub(crate) const SPINNER_STYLE_PREFIX: &str = "spinner:";
+
+const TOOL_DIM_STYLE: &str = "tool_dim";
 
 const CODE_OUTPUT_DIVIDER: &str = "  ────────────";
 /// Instruction blocks have no tool of their own, so they render under this name.
@@ -123,10 +128,53 @@ pub fn done_style() -> RoleStyle {
     }
 }
 
+/// A span the panel repaints with the current spinner glyph every tick. A
+/// `style` of `None` draws with the theme's spinner style; a name comes from
+/// the semantic `{spinner = name}` form and resolves through the theme.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpinnerLine {
+    pub line: usize,
+    pub span: usize,
+    pub style: Option<Arc<str>>,
+}
+
+impl SpinnerLine {
+    pub fn new(line: usize, span: usize) -> Self {
+        Self {
+            line,
+            span,
+            style: None,
+        }
+    }
+}
+
+/// A spinner marker's optional style name, `Some` only for named styles:
+/// `Some(None)` is the bare `spinner`, `Some(Some(name))` is `spinner:<name>`.
+pub(crate) fn spinner_style_name(style: &SpanStyle) -> Option<Option<&str>> {
+    let SpanStyle::Named(name) = style else {
+        return None;
+    };
+    if name == SPINNER_STYLE_NAME {
+        Some(None)
+    } else {
+        name.strip_prefix(SPINNER_STYLE_PREFIX).map(Some)
+    }
+}
+
+/// A spinner span baked to the current frame. The panel overwrites it every
+/// A spinner span baked to the current frame. The panel overwrites it every
+/// tick; this is the glyph a render carries until the first repaint.
+pub(crate) fn spinner_span(style: Option<&str>) -> Span<'static> {
+    Span::styled(
+        spinner_glyph(crate::animation::animation_elapsed_ms()),
+        theme::style_by_name(style.unwrap_or(SPINNER_STYLE_NAME)),
+    )
+}
+
 pub struct ToolLines {
     pub lines: Vec<Line<'static>>,
     pub highlight: Option<HighlightRequest>,
-    pub spinner_lines: Vec<(usize, usize)>,
+    pub spinner_lines: Vec<SpinnerLine>,
     /// Index of the first live-buffer snapshot line, recorded in the same
     /// pass that lays out `lines`, so click rows can never drift from them.
     pub snapshot_base: Option<usize>,
@@ -188,14 +236,17 @@ pub fn format_timestamp_now(format: ClockFormat) -> String {
     zoned.strftime(crate::clock::hms(format)).to_string()
 }
 
-pub fn append_right_info(
-    line: &mut Line<'static>,
+/// Padding that right-aligns a `usage`/`timestamp` tail on a header line
+/// `header_width` cells wide, or `None` when it would not fit. The one place
+/// the `+1`/two-space rule lives, shared by the transcript and the Lua bridge.
+fn right_info_pad(
+    header_width: usize,
     usage: Option<&str>,
     timestamp: Option<&str>,
     width: u16,
-) {
+) -> Option<usize> {
     if usage.is_none() && timestamp.is_none() {
-        return;
+        return None;
     }
     let separator = if usage.is_some() && timestamp.is_some() {
         2
@@ -204,16 +255,24 @@ pub fn append_right_info(
     };
     let suffix_len =
         usage.map_or(0, UnicodeWidthStr::width) + timestamp.map_or(0, str::len) + separator + 1;
+    let w = width as usize;
+    (header_width + 1 + suffix_len <= w).then(|| w - header_width - suffix_len)
+}
+
+pub fn append_right_info(
+    line: &mut Line<'static>,
+    usage: Option<&str>,
+    timestamp: Option<&str>,
+    width: u16,
+) {
     let header_width: usize = line
         .spans
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
-    let w = width as usize;
-    if header_width + 1 + suffix_len > w {
+    let Some(pad) = right_info_pad(header_width, usage, timestamp, width) else {
         return;
-    }
-    let pad = w - header_width - suffix_len;
+    };
     line.spans.push(Span::raw(" ".repeat(pad)));
     if let Some(u) = usage {
         line.spans
@@ -226,6 +285,44 @@ pub fn append_right_info(
         line.spans
             .push(Span::styled(ts.to_owned(), theme::current().timestamp));
     }
+}
+
+/// [`append_right_info`]'s tail as snapshot spans, for the Lua bridge. The
+/// padding and plain separators carry an explicit empty style so they resolve
+/// back to `Style::default`, exactly like the `Span::raw` in the transcript.
+pub(crate) fn right_info_spans(
+    header_width: usize,
+    usage: Option<&str>,
+    timestamp: Option<&str>,
+    width: u16,
+) -> Vec<SnapshotSpan> {
+    let Some(pad) = right_info_pad(header_width, usage, timestamp, width) else {
+        return Vec::new();
+    };
+    let plain = || SpanStyle::Inline(InlineStyle::default());
+    let mut spans = vec![SnapshotSpan {
+        text: " ".repeat(pad),
+        style: plain(),
+    }];
+    if let Some(u) = usage {
+        spans.push(SnapshotSpan {
+            text: u.to_owned(),
+            style: SpanStyle::Named(TOOL_DIM_STYLE.to_owned()),
+        });
+        if timestamp.is_some() {
+            spans.push(SnapshotSpan {
+                text: "  ".to_owned(),
+                style: plain(),
+            });
+        }
+    }
+    if let Some(ts) = timestamp {
+        spans.push(SnapshotSpan {
+            text: ts.to_owned(),
+            style: SpanStyle::Inline(snapshot_style(theme::current().timestamp)),
+        });
+    }
+    spans
 }
 
 #[derive(Clone, Copy)]
@@ -309,7 +406,7 @@ fn resolve_output<'a>(
 
 struct ToolLineBuilder {
     lines: Vec<Line<'static>>,
-    spinner_lines: Vec<(usize, usize)>,
+    spinner_lines: Vec<SpinnerLine>,
     snapshot_base: Option<usize>,
     content_range: (usize, usize),
     width: u16,
@@ -366,8 +463,12 @@ impl ToolLineBuilder {
                     &mut spans,
                     spinner_str(0),
                     self.indicator,
-                    |span_idx| {
-                        spinners.push((line_idx, span_idx));
+                    |span_idx, style| {
+                        spinners.push(SpinnerLine {
+                            line: line_idx,
+                            span: span_idx,
+                            style: style.map(Arc::from),
+                        });
                     },
                 );
             }
@@ -394,15 +495,65 @@ impl ToolLineBuilder {
             }
             finished => (TOOL_INDICATOR.into(), finished_style(finished)),
         };
-        for (line, span) in &mut self.spinner_lines {
-            if *line == 0 {
-                *span += 1;
+        for placement in &mut self.spinner_lines {
+            if placement.line == 0 {
+                placement.span += 1;
             }
         }
         if matches!(self.indicator, Indicator::InProgress) {
-            self.spinner_lines.push((0, 0));
+            self.spinner_lines.push(SpinnerLine::new(0, 0));
         }
         self.lines[0].spans.insert(0, Span::styled(text, style));
+    }
+
+    fn push_body(
+        &mut self,
+        msg: &DisplayMessage,
+        body: Option<&str>,
+        status: ToolStatus,
+        started_at: Instant,
+    ) {
+        let has_snapshot = msg.render_snapshot.is_some();
+        self.push_code_content(
+            msg.tool_input.as_deref(),
+            if has_snapshot {
+                None
+            } else {
+                msg.tool_output.as_deref()
+            },
+        );
+        let show_output = if let Some(ref snapshot) = msg.render_snapshot {
+            self.push_snapshot(snapshot, started_at);
+            // A denial can land while the snapshot still shows only the
+            // pre-permission script preview, so the error goes below it.
+            // But a collapsed snapshot keeps just a window of the output,
+            // so checking the full text would duplicate long outputs. The
+            // last line is a reliable probe: a tail-keep view always shows
+            // it, a bare script preview never does.
+            matches!(status, ToolStatus::Error) && {
+                let err_text = msg.tool_output.as_deref().map(|o| o.as_text());
+                let tail = err_text
+                    .as_deref()
+                    .or(body)
+                    .map_or("", str::trim)
+                    .lines()
+                    .next_back()
+                    .map_or("", str::trim);
+                !tail.is_empty() && !snapshot.text().contains(tail)
+            }
+        } else {
+            true
+        };
+        if show_output {
+            let resolved = resolve_output(
+                msg.tool_output.as_deref(),
+                body,
+                msg.live_output.as_deref(),
+                msg.truncated_lines,
+                self.limits,
+            );
+            self.push_resolved_output(&resolved);
+        }
     }
 
     fn push_code_content(&mut self, input: Option<&ToolInput>, output: Option<&ToolOutput>) {
@@ -475,7 +626,10 @@ impl ToolLineBuilder {
             snapshot_to_lines_range(snapshot, TOOL_BODY_INDENT, 0..total, frame, self.indicator);
         self.lines.extend(lines);
         self.spinner_lines
-            .extend(spinners.into_iter().map(|(line, span)| (base + line, span)));
+            .extend(spinners.into_iter().map(|mut placement| {
+                placement.line += base;
+                placement
+            }));
     }
 
     fn finish(
@@ -506,32 +660,32 @@ fn push_text_lines(lines: &mut Vec<Line<'static>>, text: &str, indent: &'static 
     }
 }
 
-/// Bakes snapshot spans onto `out`. `"spinner"`-styled spans bake to the
-/// current frame while a tool is in progress, and `on_spinner` gets their
-/// span index in the same pass, so animation offsets can never drift from
-/// the baked spans. Finished tools bake a static dot instead and record no
-/// spinner position, so a stale `"spinner"` span can never keep animating.
+/// Bakes snapshot spans onto `out`. Spinner-styled spans bake to the current
+/// frame while a tool is in progress, and `on_spinner` gets their span index
+/// and optional style name in the same pass, so animation offsets can never
+/// drift from the baked spans. Finished tools bake a static dot instead and
+/// record no spinner position, so a stale spinner span can never keep
+/// animating.
 fn bake_spans(
     src: &[SnapshotSpan],
     out: &mut Vec<Span<'static>>,
     spinner_frame: &'static str,
     indicator: Indicator,
-    mut on_spinner: impl FnMut(usize),
+    mut on_spinner: impl FnMut(usize, Option<&str>),
 ) {
     for span in src {
-        if matches!(&span.style, SpanStyle::Named(n) if n == SPINNER_STYLE_NAME) {
-            match indicator {
+        match spinner_style_name(&span.style) {
+            Some(style) => match indicator {
                 Indicator::InProgress => {
-                    on_spinner(out.len());
+                    on_spinner(out.len(), style);
                     out.push(Span::styled(spinner_frame, theme::current().spinner));
                 }
                 finished => out.push(Span::styled(TOOL_INDICATOR, finished_style(finished))),
-            }
-        } else {
-            out.push(Span::styled(
+            },
+            None => out.push(Span::styled(
                 span.text.clone(),
                 resolve_span_style(&span.style),
-            ));
+            )),
         }
     }
 }
@@ -550,7 +704,7 @@ fn snapshot_to_lines_range(
     range: std::ops::Range<usize>,
     spinner_frame: &'static str,
     indicator: Indicator,
-) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+) -> (Vec<Line<'static>>, Vec<SpinnerLine>) {
     let mut spinners = Vec::new();
     let lines = snapshot.lines[range]
         .iter()
@@ -562,8 +716,12 @@ fn snapshot_to_lines_range(
                 &mut spans,
                 spinner_frame,
                 indicator,
-                |span_idx| {
-                    spinners.push((i, span_idx));
+                |span_idx, style| {
+                    spinners.push(SpinnerLine {
+                        line: i,
+                        span: span_idx,
+                        style: style.map(Arc::from),
+                    });
                 },
             );
             Line::from(spans)
@@ -654,47 +812,38 @@ pub fn build_tool_lines(
         msg.render_header.as_ref(),
     );
     b.prepend_indicator(rctx.started_at);
-    let has_snapshot = msg.render_snapshot.is_some();
-    b.push_code_content(
-        msg.tool_input.as_deref(),
-        if has_snapshot {
-            None
-        } else {
-            msg.tool_output.as_deref()
-        },
-    );
-    let show_output = if let Some(ref snapshot) = msg.render_snapshot {
-        b.push_snapshot(snapshot, rctx.started_at);
-        // A denial can land while the snapshot still shows only the
-        // pre-permission script preview, so the error goes below it.
-        // But a collapsed snapshot keeps just a window of the output,
-        // so checking the full text would duplicate long outputs. The
-        // last line is a reliable probe: a tail-keep view always shows
-        // it, a bare script preview never does.
-        matches!(status, ToolStatus::Error) && {
-            let err_text = msg.tool_output.as_deref().map(|o| o.as_text());
-            let tail = err_text
-                .as_deref()
-                .or(body)
-                .map_or("", str::trim)
-                .lines()
-                .next_back()
-                .map_or("", str::trim);
-            !tail.is_empty() && !snapshot.text().contains(tail)
-        }
-    } else {
-        true
+    b.push_body(msg, body, status, rctx.started_at);
+    b.finish(
+        msg.tool_input.clone(),
+        msg.tool_output.clone(),
+        TOOL_BODY_INDENT,
+    )
+}
+
+/// The body [`build_tool_lines`] appends after its header: code content, the
+/// divider, resolved output and snapshot lines, and their metadata, without
+/// the header, indicator, annotation or right-info. The Lua tool renderer
+/// draws the outer design and places this via `maki.ui.transcript_tool()`.
+pub fn build_tool_body(
+    msg: &DisplayMessage,
+    status: ToolStatus,
+    rctx: &RenderCtx,
+    expanded: SectionFlags,
+) -> ToolLines {
+    let tool_name = msg.role.tool_name().unwrap_or(UNNAMED_TOOL);
+    let (_, body) = match msg.text.split_once('\n') {
+        Some((h, b)) => (h, Some(b)),
+        None => (msg.text.as_str(), None),
     };
-    if show_output {
-        let resolved = resolve_output(
-            msg.tool_output.as_deref(),
-            body,
-            msg.live_output.as_deref(),
-            msg.truncated_lines,
-            b.limits,
-        );
-        b.push_resolved_output(&resolved);
-    }
+
+    let mut b = ToolLineBuilder::new(
+        rctx.width,
+        expanded,
+        rctx.tool_output_lines.get(tool_name),
+        status.into(),
+    );
+    b.apply_output_format(msg.tool_output.as_deref());
+    b.push_body(msg, body, status, rctx.started_at);
     b.finish(
         msg.tool_input.clone(),
         msg.tool_output.clone(),
@@ -1273,7 +1422,10 @@ mod tests {
             SectionFlags::default(),
         );
         // indicator + `tool> ` prefix + "3 tools " sit before the header spinner.
-        assert_eq!(tl.spinner_lines, vec![(0, 3), (0, 0)]);
+        assert_eq!(
+            tl.spinner_lines,
+            vec![SpinnerLine::new(0, 3), SpinnerLine::new(0, 0)]
+        );
     }
 
     const DENIAL_MSG: &str = "Permission denied: user rejected";
@@ -1886,7 +2038,7 @@ mod tests {
         ]);
         let (lines, spinners) =
             snapshot_to_lines_range(&snapshot, "", 0..2, "⠹ ", Indicator::InProgress);
-        assert_eq!(spinners, vec![(1, 2)]);
+        assert_eq!(spinners, vec![SpinnerLine::new(1, 2)]);
         assert_eq!(lines[1].spans[2].content.as_ref(), "⠹ ");
     }
 
