@@ -6,7 +6,7 @@ use std::time::Duration;
 use humantime::format_duration;
 use maki_highlight::{DEFAULT_COLOR_NAME, SegmentColor};
 use maki_lua_macro::{lua_fn, lua_table};
-use mlua::{Lua, Result as LuaResult, Table};
+use mlua::{Lua, Result as LuaResult, Table, Value};
 use strum::VariantNames;
 
 use crate::api::util::command::{
@@ -20,10 +20,16 @@ pub(crate) mod blit;
 pub(crate) mod buf;
 pub(crate) mod render;
 pub(crate) mod win;
+pub(crate) mod wrap;
 
 use crate::runtime::with_task_bufs;
 use render::set_block_renderer__doc;
 use win::WinHandle;
+use wrap::wrap_lines;
+
+const WIDTH_ARG: &str = "width";
+const HEIGHT_ARG: &str = "height";
+const POSITIVE_INT_ERR: &str = "must be a positive integer";
 
 pub(crate) struct HintStore {
     hints: BTreeMap<Arc<str>, Vec<(String, String)>>,
@@ -265,6 +271,114 @@ fn truncate_text(lua: &Lua, text: String, max_width: usize) -> LuaResult<Table> 
     tbl.set("head", &text[..idx])?;
     tbl.set("tail", &text[idx..])?;
     Ok(tbl)
+}
+
+/// Reads a dimension argument. Programmer errors throw, so a bad width or
+/// height fails loudly instead of wrapping or placing nothing.
+fn positive_dimension(value: &Value, arg: &str) -> LuaResult<u16> {
+    let n = match value {
+        Value::Integer(i) => *i,
+        Value::Number(f) if f.fract() == 0.0 => *f as i64,
+        _ => return Err(mlua::Error::runtime(format!("{arg} {POSITIVE_INT_ERR}"))),
+    };
+    u16::try_from(n)
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| mlua::Error::runtime(format!("{arg} {POSITIVE_INT_ERR}")))
+}
+
+/// Wraps text to a width in display cells and returns a table of lines.
+///
+/// The input is a string or one line of `{text, style?}` spans, the shape
+/// `buf:line()` takes. The output is always a table of lines, each a span
+/// list, so a block renderer can `return maki.ui.wrap(...)` directly.
+///
+/// Text splits on `\n` into hard paragraphs, and every hard break is a line
+/// break. Within a paragraph the wrap is a plain greedy fill: it adds words
+/// until the next one would overflow, then breaks before it. A word wider
+/// than `width` is cut at the width. Whitespace at a break is dropped, other
+/// whitespace stays. A single character wider than the whole width gets a
+/// line of its own. Cell widths come from `unicode-width`, so a CJK character
+/// counts 2. Styled spans keep their style and split at break points.
+///
+/// This is not a copy of how the transcript draws wrapped Rust lines. Treat
+/// it as its own predictable greedy wrap.
+///
+/// @param text string|table A string, or a line of `{text, style?}` spans.
+/// @param width integer Wrap width in display cells, > 0.
+/// @return (table) Lines: `{ { {text, style}, ... }, ... }`.
+/// @example
+/// maki.ui.set_block_renderer(function(prev, block, ctx)
+///   if block.kind ~= "user" then
+///     return prev(block, ctx)
+///   end
+///   return maki.ui.wrap({ { block.text, { italic = true } } }, ctx.width)
+/// end)
+#[lua_fn]
+fn wrap(lua: &Lua, text: Value, width: Value) -> LuaResult<Table> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let input = buf::parse_line(&text)?;
+    let wrapped = wrap_lines(&input.spans, width);
+    let out = lua.create_table_with_capacity(wrapped.len(), 0)?;
+    for (i, line) in wrapped.iter().enumerate() {
+        out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
+    }
+    Ok(out)
+}
+
+/// Builds a render object for a raw terminal sequence: exactly
+/// `{raw = seq, width = width, height = height}`.
+///
+/// This is a shape helper. The final writer validates the sequence and owns
+/// where it goes, so calling this writes nothing. Return the object from a
+/// block renderer to place the sequence in a rectangle `width` cells wide and
+/// `height` rows tall. A sequence must be cursor-local: graphic rendition,
+/// cursor movement, and save or restore are allowed, while OSC and graphics
+/// payloads are refused. A refused sequence leaves the block on its Rust
+/// rendering.
+///
+/// @param seq string The terminal sequence, e.g. an SGR escape.
+/// @param width integer Rectangle width in cells, > 0.
+/// @param height integer Rectangle height in rows, > 0.
+/// @return (table) `{raw = seq, width = width, height = height}`.
+/// @example
+/// maki.ui.set_block_renderer(function(prev, block, ctx)
+///   if block.kind ~= "user" then
+///     return prev(block, ctx)
+///   end
+///   return {
+///     { "cursor lands here:" },
+///     maki.ui.raw("\27[7m cursor \27[0m", 8, 1),
+///   }
+/// end)
+#[lua_fn]
+fn raw(lua: &Lua, seq: String, width: Value, height: Value) -> LuaResult<Table> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let height = positive_dimension(&height, HEIGHT_ARG)?;
+    let object = lua.create_table_with_capacity(0, 3)?;
+    object.raw_set("raw", seq)?;
+    object.raw_set("width", width)?;
+    object.raw_set("height", height)?;
+    Ok(object)
+}
+
+/// Returns its arguments as a Lua array. A readability helper: this matches
+/// `{ a, b, c }` and does nothing more, so a renderer body reads like a list
+/// of lines.
+///
+/// @param values any Values to collect, in order.
+/// @return (table) Array of the arguments.
+/// @example
+/// maki.ui.set_block_renderer(function(prev, block, ctx)
+///   return maki.ui.lines("first", { { "styled", "bold" } }, "third")
+/// end)
+#[lua_fn]
+fn lines(lua: &Lua, values: mlua::Variadic<Value>) -> LuaResult<Table> {
+    let out = lua.create_table_with_capacity(values.len(), 0)?;
+    for (i, value) in values.into_iter().enumerate() {
+        out.raw_set(i + 1, value)?;
+    }
+    Ok(out)
 }
 
 /// Shows a brief message in the status bar. The message disappears
@@ -509,7 +623,7 @@ lua_table! {
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
         buf, theme_color, highlight, markdown, humantime, terminal_size,
-        display_width, truncate_text,
+        display_width, truncate_text, wrap, raw, lines,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
         manual set_block_renderer, manual set_window_title,
     ]
@@ -1385,5 +1499,70 @@ mod tests {
         store.set(Arc::from("plug"), vec![("a".into(), "b".into())]);
         store.set(Arc::from("plug"), vec![]);
         assert!(store.snapshot_entries().is_empty());
+    }
+
+    fn ui_lua() -> Lua {
+        let lua = Lua::new();
+        let ui = create_ui_table(&lua, None, Arc::from("test")).unwrap();
+        lua.globals().set("ui", ui).unwrap();
+        lua
+    }
+
+    #[test]
+    fn wrap_returns_a_table_of_lines() {
+        let lua = ui_lua();
+        let lines: Table = lua
+            .load(r#"return ui.wrap("hello world", 5)"#)
+            .eval()
+            .unwrap();
+        assert_eq!(lines.len().unwrap(), 2);
+        let first: Table = lines.get(1).unwrap();
+        let span: Table = first.get(1).unwrap();
+        assert_eq!(span.get::<String>(1).unwrap(), "hello");
+        let second: Table = lines.get(2).unwrap();
+        let span: Table = second.get(1).unwrap();
+        assert_eq!(span.get::<String>(1).unwrap(), "world");
+    }
+
+    #[test]
+    fn raw_returns_exactly_the_render_object_shape() {
+        let lua = ui_lua();
+        let object: Table = lua
+            .load(r#"return ui.raw("\27[7m cursor \27[0m", 8, 1)"#)
+            .eval()
+            .unwrap();
+        let keys = object.pairs::<String, Value>().count();
+        assert_eq!(keys, 3);
+        assert_eq!(
+            object.get::<String>("raw").unwrap(),
+            "\u{1b}[7m cursor \u{1b}[0m"
+        );
+        assert_eq!(object.get::<u16>("width").unwrap(), 8);
+        assert_eq!(object.get::<u16>("height").unwrap(), 1);
+    }
+
+    #[test]
+    fn lines_collects_arguments_in_order() {
+        let lua = ui_lua();
+        let out: Table = lua
+            .load(r#"return ui.lines("a", { "b" }, 3)"#)
+            .eval()
+            .unwrap();
+        assert_eq!(out.len().unwrap(), 3);
+        assert_eq!(out.get::<String>(1).unwrap(), "a");
+        let second: Table = out.get(2).unwrap();
+        assert_eq!(second.get::<String>(1).unwrap(), "b");
+        assert_eq!(out.get::<i64>(3).unwrap(), 3);
+    }
+
+    #[test_case(r#"ui.wrap("hi", 0)"#, WIDTH_ARG ; "wrap_zero_width")]
+    #[test_case(r#"ui.wrap("hi", -2)"#, WIDTH_ARG ; "wrap_negative_width")]
+    #[test_case(r#"ui.wrap("hi", "wide")"#, WIDTH_ARG ; "wrap_non_numeric_width")]
+    #[test_case(r#"ui.raw("x", 0, 1)"#, WIDTH_ARG ; "raw_zero_width")]
+    #[test_case(r#"ui.raw("x", 1, -1)"#, HEIGHT_ARG ; "raw_negative_height")]
+    #[test_case(r#"ui.raw("x", 1, "tall")"#, HEIGHT_ARG ; "raw_non_numeric_height")]
+    fn dimension_errors_throw(code: &str, expected: &str) {
+        let err = ui_lua().load(code).exec().unwrap_err().to_string();
+        assert!(err.contains(expected), "expected {expected:?} in: {err}");
     }
 }

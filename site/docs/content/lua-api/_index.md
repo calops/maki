@@ -5112,6 +5112,116 @@ local t = maki.ui.truncate_text("hello world", 5)
 
 ---
 
+### `maki.ui.wrap()` {#maki-ui-wrap}
+
+```lua
+maki.ui.wrap({text}, {width})
+```
+
+Wraps text to a width in display cells and returns a table of lines.
+
+The input is a string or one line of `{text, style?}` spans, the shape
+`buf:line()` takes. The output is always a table of lines, each a span
+list, so a block renderer can `return maki.ui.wrap(...)` directly.
+
+Text splits on `\n` into hard paragraphs, and every hard break is a line
+break. Within a paragraph the wrap is a plain greedy fill: it adds words
+until the next one would overflow, then breaks before it. A word wider
+than `width` is cut at the width. Whitespace at a break is dropped, other
+whitespace stays. A single character wider than the whole width gets a
+line of its own. Cell widths come from `unicode-width`, so a CJK character
+counts 2. Styled spans keep their style and split at break points.
+
+This is not a copy of how the transcript draws wrapped Rust lines. Treat
+it as its own predictable greedy wrap.
+
+**Parameters:**
+
+- `{text}` (`string|table`) A string, or a line of `{text, style?}` spans.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
+
+**Returns:** (`table`) Lines: `{ { {text, style}, ... }, ... }`.
+
+**Example:**
+
+```lua
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  if block.kind ~= "user" then
+    return prev(block, ctx)
+  end
+  return maki.ui.wrap({ { block.text, { italic = true } } }, ctx.width)
+end)
+```
+
+---
+
+### `maki.ui.raw()` {#maki-ui-raw}
+
+```lua
+maki.ui.raw({seq}, {width}, {height})
+```
+
+Builds a render object for a raw terminal sequence: exactly
+`{raw = seq, width = width, height = height}`.
+
+This is a shape helper. The final writer validates the sequence and owns
+where it goes, so calling this writes nothing. Return the object from a
+block renderer to place the sequence in a rectangle `width` cells wide and
+`height` rows tall. A sequence must be cursor-local: graphic rendition,
+cursor movement, and save or restore are allowed, while OSC and graphics
+payloads are refused. A refused sequence leaves the block on its Rust
+rendering.
+
+**Parameters:**
+
+- `{seq}` (`string`) The terminal sequence, e.g. an SGR escape.
+- `{width}` (`integer`) Rectangle width in cells, > 0.
+- `{height}` (`integer`) Rectangle height in rows, > 0.
+
+**Returns:** (`table`) `{raw = seq, width = width, height = height}`.
+
+**Example:**
+
+```lua
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  if block.kind ~= "user" then
+    return prev(block, ctx)
+  end
+  return {
+    { "cursor lands here:" },
+    maki.ui.raw("\27[7m cursor \27[0m", 8, 1),
+  }
+end)
+```
+
+---
+
+### `maki.ui.lines()` {#maki-ui-lines}
+
+```lua
+maki.ui.lines({...})
+```
+
+Returns its arguments as a Lua array. A readability helper: this matches
+`{ a, b, c }` and does nothing more, so a renderer body reads like a list
+of lines.
+
+**Parameters:**
+
+- `{...}` (`any`) Values to collect, in order.
+
+**Returns:** (`table`) Array of the arguments.
+
+**Example:**
+
+```lua
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  return maki.ui.lines("first", { { "styled", "bold" } }, "third")
+end)
+```
+
+---
+
 ### `maki.ui.flash()` {#maki-ui-flash}
 
 ```lua
