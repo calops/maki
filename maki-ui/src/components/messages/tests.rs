@@ -4,10 +4,11 @@ use crate::chat::{DONE_TEXT, ERROR_TEXT};
 use crate::components::scrollbar::SCROLLBAR_THUMB;
 use crate::repaint::expect::{OWED, QUIET};
 use crate::selection::{DocPos, Selection, SelectionZone};
-use maki_agent::tools::{BASH_TOOL_NAME, GREP_TOOL_NAME, WRITE_TOOL_NAME};
+use maki_agent::tools::{BASH_TOOL_NAME, GREP_TOOL_NAME, ToolRegistry, WRITE_TOOL_NAME};
 use maki_agent::{
     GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan, SpanStyle, ToolInput, ToolOutput,
 };
+use maki_lua::{BlockRender, PluginHost, RenderCtx};
 use maki_providers::ImageMediaType;
 use ratatui::backend::TestBackend;
 use std::collections::HashSet;
@@ -2935,4 +2936,134 @@ fn failure_log_reports_each_key_once() {
     assert!(log.report(&plugin, 2, "boom"));
     assert!(log.report(&plugin, 1, "other"));
     assert!(log.report(&Arc::from("other"), 1, "boom"));
+}
+
+const DONE_WIDTH: u16 = 80;
+
+/// The lines the bundled renderer chain produces for a block, via a real host.
+fn lua_block_lines(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
+    const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+    const HANDLED: &str = "the built-in ui renderer must handle this block";
+
+    crate::markdown::install_transcript_markdown();
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
+        .expect("every bundled plugin loads");
+    let reply = host.event_handle().request_render_block(
+        block::project(message),
+        RenderCtx {
+            width,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(REPLY_TIMEOUT).expect("render reply")
+    else {
+        panic!("{HANDLED}");
+    };
+    let (lines, raw) = block::render(&objects).expect("valid render objects");
+    assert!(raw.is_empty());
+    lines
+}
+
+/// The bundled `ui` plugin owns `done` now, so its render objects must land on
+/// exactly the lines Rust used to build. Anything less would make the port
+/// visible to a reader.
+#[test_case("Done!" ; "single line")]
+#[test_case("" ; "empty")]
+#[test_case("all\nlines\n" ; "trailing break")]
+#[test_case("\n\nkept\n" ; "leading breaks")]
+fn lua_done_renderer_matches_the_rust_lines(text: &str) {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    let message = DisplayMessage::new(DisplayRole::Done, text.to_owned());
+    assert_eq!(
+        lua_block_lines(&message, DONE_WIDTH),
+        build_message_lines(&message, DONE_WIDTH)
+    );
+}
+
+#[test_case("boom" ; "single line")]
+#[test_case("a\nb\n" ; "multi line")]
+fn lua_error_renderer_matches_the_rust_lines(text: &str) {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    let message = DisplayMessage::new(DisplayRole::Error, text.to_owned());
+    assert_eq!(
+        lua_block_lines(&message, DONE_WIDTH),
+        build_message_lines(&message, DONE_WIDTH)
+    );
+}
+
+/// Every Markdown shape the transcript renderer handles, at widths that force
+/// wrapping and widths that do not.
+const MARKDOWN_CASES: &[&str] = &[
+    "a plain paragraph long enough that a narrow width has to wrap it onto several lines",
+    "- first\n- second\n  - nested\n\n1. ordered\n2. ordered two",
+    "| head | other |\n| --- | --- |\n| cell | value |",
+    "> quoted line\n> continued",
+    "```rust\nfn main() { let answer = compute(); }\n```",
+    "# heading\n\n**bold** and *italic* and `code`",
+];
+const ROLE_WIDTHS: &[u16] = &[24, 48, 120];
+
+fn assert_role_markdown_parity(role: DisplayRole) {
+    const THEME: &str = "tokyonight";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    for text in MARKDOWN_CASES {
+        for &width in ROLE_WIDTHS {
+            let message = DisplayMessage::new(role.clone(), (*text).to_owned());
+            assert_eq!(
+                lua_block_lines(&message, width),
+                build_message_lines(&message, width),
+                "text={text:?} width={width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lua_assistant_renderer_matches_the_rust_lines() {
+    assert_role_markdown_parity(DisplayRole::Assistant);
+}
+
+#[test]
+fn lua_user_renderer_matches_the_rust_lines() {
+    assert_role_markdown_parity(DisplayRole::User);
+}
+
+/// The reason `theme_style` exists over `theme_color`: a modifier the theme
+/// puts on the success style has to survive the Lua round trip too.
+#[test]
+fn lua_done_renderer_keeps_a_themed_modifier() {
+    const THEMED: &str = r##"
+[palette]
+ok = "#00ff00"
+
+[ui.tool_success]
+fg = "ok"
+modifiers = ["italic", "underlined"]
+"##;
+    theme::set(theme::Theme::from_toml(THEMED).expect("theme must parse"));
+    let message = DisplayMessage::new(DisplayRole::Done, "Done!".to_owned());
+    assert_eq!(
+        lua_block_lines(&message, DONE_WIDTH),
+        build_message_lines(&message, DONE_WIDTH)
+    );
+}
+
+/// An explicit terminal default is `Color::Reset`, not an absent slot, and
+/// must survive the Lua round trip for fg and bg alike.
+#[test]
+fn lua_done_renderer_keeps_a_themed_terminal_default() {
+    const THEMED: &str = r##"
+[ui.tool_success]
+fg = "default"
+bg = "default"
+"##;
+    theme::set(theme::Theme::from_toml(THEMED).expect("theme must parse"));
+    let message = DisplayMessage::new(DisplayRole::Done, "Done!".to_owned());
+    assert_eq!(
+        lua_block_lines(&message, DONE_WIDTH),
+        build_message_lines(&message, DONE_WIDTH)
+    );
 }

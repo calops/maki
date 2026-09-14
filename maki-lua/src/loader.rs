@@ -157,6 +157,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "list",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/list"),
     },
+    BundledPlugin {
+        name: "ui",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/ui"),
+    },
 ];
 
 /// Every bundled name, not just the default-enabled ones. An external package

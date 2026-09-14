@@ -102,6 +102,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "task",
     "thinking",
     "todo_write",
+    "ui",
     "view_image",
     "webfetch",
     "websearch",
