@@ -16,7 +16,7 @@ pub use api::net::set_allowed_private_hosts;
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::pack::{Declared, PackOp};
 pub use api::session::SessionSnapshotFn;
-pub use api::ui::render::{BlockRender, RenderCtx, RenderObject, renderer_generation};
+pub use api::ui::render::{BlockRender, Decoration, RenderCtx, RenderObject, renderer_generation};
 pub use api::ui::{
     RightInfoFn, SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, TranscriptMarkdownFn, set_right_info,
     set_transcript_markdown, spinner_token,

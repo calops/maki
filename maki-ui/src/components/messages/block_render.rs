@@ -172,9 +172,12 @@ mod tests {
 
     fn send_object(block: serde_json::Value, _ctx: RenderCtx) -> flume::Receiver<BlockRender> {
         let (tx, rx) = flume::bounded(1);
-        tx.send(BlockRender::Objects(vec![RenderObject::Lines(vec![
-            SnapshotLine::plain(block["kind"].as_str().unwrap_or_default().to_owned()),
-        ])]))
+        tx.send(BlockRender::Objects(vec![RenderObject::Lines {
+            lines: vec![SnapshotLine::plain(
+                block["kind"].as_str().unwrap_or_default().to_owned(),
+            )],
+            decorations: Vec::new(),
+        }]))
         .expect("reply");
         rx
     }
@@ -183,7 +186,7 @@ mod tests {
         objects
             .iter()
             .map(|object| match object {
-                RenderObject::Lines(lines) => lines
+                RenderObject::Lines { lines, .. } => lines
                     .iter()
                     .map(|line| {
                         line.spans

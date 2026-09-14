@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use maki_agent::SnapshotLine;
 use mlua::{Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value};
+use std::ops::Range;
 
 use crate::api::autocmd::dispatch;
 use crate::docs::{FnDoc, ParamDoc};
@@ -65,13 +66,24 @@ pub struct RenderCtx {
 /// metadata; the host owns and validates all of it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderObject {
-    Lines(Vec<SnapshotLine>),
+    Lines {
+        lines: Vec<SnapshotLine>,
+        decorations: Vec<Decoration>,
+    },
     Raw {
         seq: String,
         width: u16,
         height: u16,
     },
     ToolBody,
+}
+
+/// A semantic style range in one logical line of a [`RenderObject::Lines`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decoration {
+    pub line: usize,
+    pub bytes: Range<usize>,
+    pub group: String,
 }
 
 /// What a block renderer chain produced.
@@ -263,9 +275,10 @@ fn parse_result(value: Value) -> BlockRender {
     match value {
         Value::Nil | Value::Boolean(false) => BlockRender::Unhandled,
         Value::String(text) => match text.to_str() {
-            Ok(line) => BlockRender::Objects(vec![RenderObject::Lines(vec![SnapshotLine::plain(
-                line.to_owned(),
-            )])]),
+            Ok(line) => BlockRender::Objects(vec![RenderObject::Lines {
+                lines: vec![SnapshotLine::plain(line.to_owned())],
+                decorations: Vec::new(),
+            }]),
             Err(error) => failed(error.to_string()),
         },
         Value::Table(table) => parse_objects(table),
@@ -286,6 +299,9 @@ fn parse_objects(table: Table) -> BlockRender {
     if as_tool(&table) {
         return BlockRender::Objects(vec![RenderObject::ToolBody]);
     }
+    if let Ok(Value::Table(lines)) = table.raw_get::<Value>("lines") {
+        return parse_lines_object(lines, table);
+    }
     let mut out = Vec::with_capacity(table.raw_len());
     for idx in 1..=table.raw_len() {
         let item: Value = match table.raw_get(idx) {
@@ -293,11 +309,17 @@ fn parse_objects(table: Table) -> BlockRender {
             Err(error) => return failed(error.to_string()),
         };
         let object = match &item {
-            Value::String(_) => parse_line(&item).map(|line| RenderObject::Lines(vec![line])),
+            Value::String(_) => parse_line(&item).map(|line| RenderObject::Lines {
+                lines: vec![line],
+                decorations: Vec::new(),
+            }),
             Value::Table(inner) => match as_raw(inner) {
                 Some(raw) => raw,
                 None if as_tool(inner) => Ok(RenderObject::ToolBody),
-                None => parse_line(&item).map(|line| RenderObject::Lines(vec![line])),
+                None => parse_line(&item).map(|line| RenderObject::Lines {
+                    lines: vec![line],
+                    decorations: Vec::new(),
+                }),
             },
             other => Err(mlua::Error::runtime(format!(
                 "render object must be a string, a line, or {{raw = ...}}, got {}",
@@ -310,6 +332,45 @@ fn parse_objects(table: Table) -> BlockRender {
         }
     }
     BlockRender::Objects(out)
+}
+
+fn parse_lines_object(lines: Table, object: Table) -> BlockRender {
+    let mut parsed_lines = Vec::with_capacity(lines.raw_len());
+    for index in 1..=lines.raw_len() {
+        match lines
+            .raw_get::<Value>(index)
+            .and_then(|line| parse_line(&line))
+        {
+            Ok(line) => parsed_lines.push(line),
+            Err(error) => return failed(error.to_string()),
+        }
+    }
+    let decorations = match object.raw_get::<Option<Table>>("decorations") {
+        Ok(Some(decorations)) => {
+            let mut parsed = Vec::with_capacity(decorations.raw_len());
+            for index in 1..=decorations.raw_len() {
+                let decoration = match decorations.raw_get::<Table>(index).and_then(|entry| {
+                    Ok(Decoration {
+                        line: entry.raw_get("line")?,
+                        bytes: entry.raw_get("start_byte")?..entry.raw_get("end_byte")?,
+                        group: entry.raw_get("group")?,
+                    })
+                }) {
+                    Ok(decoration) if decoration.bytes.start <= decoration.bytes.end => decoration,
+                    Ok(_) => return failed("decoration start_byte exceeds end_byte".to_owned()),
+                    Err(error) => return failed(error.to_string()),
+                };
+                parsed.push(decoration);
+            }
+            parsed
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => return failed(error.to_string()),
+    };
+    BlockRender::Objects(vec![RenderObject::Lines {
+        lines: parsed_lines,
+        decorations,
+    }])
 }
 
 /// A tool-body request is a marker only: the host supplies the content and
@@ -392,7 +453,7 @@ mod tests {
         objects
             .iter()
             .map(|object| match object {
-                RenderObject::Lines(lines) => lines
+                RenderObject::Lines { lines, .. } => lines
                     .iter()
                     .map(|line| {
                         line.spans
@@ -566,12 +627,52 @@ mod tests {
         let BlockRender::Objects(objects) = render(&lua, json!({"kind": "user"})) else {
             panic!("expected objects");
         };
-        let RenderObject::Lines(lines) = &objects[0] else {
+        let RenderObject::Lines { lines, .. } = &objects[0] else {
             panic!("expected lines");
         };
         assert_eq!(lines[0].spans.len(), 2);
         assert_eq!(lines[0].spans[0].text, "a");
         assert_eq!(lines[0].spans[1].text, "b");
+    }
+
+    #[test]
+    fn lines_object_parses_decorations() {
+        let lua = lua_with_store();
+        register(
+            &lua,
+            PLUGIN,
+            "function(prev, block, ctx) return { lines = { 'hello' }, decorations = { { line = 0, start_byte = 1, end_byte = 4, group = 'syntax.keyword' } } } end",
+        );
+        let BlockRender::Objects(objects) = render(&lua, json!({"kind": "user"})) else {
+            panic!("expected objects");
+        };
+        let RenderObject::Lines { lines, decorations } = &objects[0] else {
+            panic!("expected lines");
+        };
+        assert_eq!(lines[0].spans[0].text, "hello");
+        assert_eq!(
+            decorations,
+            &[Decoration {
+                line: 0,
+                bytes: 1..4,
+                group: "syntax.keyword".to_owned()
+            }]
+        );
+    }
+
+    #[test_case("{ lines = { 'a' }, decorations = { { line = 0, start_byte = 2, end_byte = 1, group = 'x' } } }" ; "inverted_range")]
+    #[test_case("{ lines = { 'a' }, decorations = { { line = 0, start_byte = 0, end_byte = 1 } } }" ; "missing_group")]
+    fn malformed_decoration_fails(value: &str) {
+        let lua = lua_with_store();
+        register(
+            &lua,
+            PLUGIN,
+            &format!("function(prev, block, ctx) return {value} end"),
+        );
+        assert!(matches!(
+            render(&lua, json!({"kind": "user"})),
+            BlockRender::Failed { .. }
+        ));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 
 use maki_agent::types::InlineStyle;
 use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle};
-use maki_lua::RenderObject;
+use maki_lua::{Decoration, RenderObject};
 
 use super::raw;
 use crate::components::code_view::SectionFlags;
@@ -17,6 +17,7 @@ use crate::components::tool_display::{
     spinner_token,
 };
 use crate::components::{DisplayMessage, DisplayRole, ToolStatus};
+use crate::theme;
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
 /// run of placeholder cells.
@@ -268,27 +269,18 @@ pub(crate) fn render_with_tools(
     let mut body = None;
     for object in objects {
         match object {
-            RenderObject::Lines(source) => {
-                for source_line in source {
-                    let line_idx = lines.len();
-                    let mut spans = Vec::with_capacity(source_line.spans.len());
-                    for source_span in &source_line.spans {
-                        match spinner_style_name(&source_span.style) {
-                            Some(style) => {
-                                spinner_lines.push(SpinnerLine {
-                                    line: line_idx,
-                                    span: spans.len(),
-                                    style: style.map(Arc::from),
-                                });
-                                spans.push(spinner_span(style));
-                            }
-                            None => spans.push(Span::styled(
-                                source_span.text.clone(),
-                                resolve_span_style(&source_span.style),
-                            )),
-                        }
+            RenderObject::Lines {
+                lines: source,
+                decorations,
+            } => {
+                let decorated = render_lines(source, decorations)?;
+                let offset = lines.len();
+                for (line_idx, mut rendered) in decorated.into_iter().enumerate() {
+                    for placement in &mut rendered.1 {
+                        placement.line += offset + line_idx;
                     }
-                    lines.push(Line::from(spans));
+                    spinner_lines.extend(rendered.1);
+                    lines.push(rendered.0);
                 }
             }
             RenderObject::Raw { seq, width, height } => {
@@ -318,6 +310,92 @@ pub(crate) fn render_with_tools(
         tool: body,
         spinner_lines,
     })
+}
+
+fn render_lines(
+    source: &[SnapshotLine],
+    decorations: &[Decoration],
+) -> Option<Vec<(Line<'static>, Vec<SpinnerLine>)>> {
+    let mut by_line = vec![Vec::new(); source.len()];
+    for decoration in decorations {
+        let line = source.get(decoration.line)?;
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        if decoration.bytes.end > text.len()
+            || !text.is_char_boundary(decoration.bytes.start)
+            || !text.is_char_boundary(decoration.bytes.end)
+        {
+            return None;
+        }
+        by_line[decoration.line].push(decoration);
+    }
+    source
+        .iter()
+        .enumerate()
+        .map(|(line_idx, line)| render_line(line, &by_line[line_idx]))
+        .collect()
+}
+
+fn render_line(
+    source: &SnapshotLine,
+    decorations: &[&Decoration],
+) -> Option<(Line<'static>, Vec<SpinnerLine>)> {
+    let mut spans = Vec::new();
+    let mut spinners = Vec::new();
+    let mut start = 0;
+    for source_span in &source.spans {
+        let end = start + source_span.text.len();
+        if let Some(style) = spinner_style_name(&source_span.style) {
+            if decorations
+                .iter()
+                .any(|decoration| decoration.bytes.start < end && start < decoration.bytes.end)
+            {
+                return None;
+            }
+            spinners.push(SpinnerLine {
+                line: 0,
+                span: spans.len(),
+                style: style.map(Arc::from),
+            });
+            spans.push(spinner_span(style));
+            start = end;
+            continue;
+        }
+        if start == end {
+            spans.push(Span::styled(
+                String::new(),
+                resolve_span_style(&source_span.style),
+            ));
+            continue;
+        }
+        let mut boundaries = vec![start, end];
+        for decoration in decorations {
+            if decoration.bytes.start > start && decoration.bytes.start < end {
+                boundaries.push(decoration.bytes.start);
+            }
+            if decoration.bytes.end > start && decoration.bytes.end < end {
+                boundaries.push(decoration.bytes.end);
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        for chunk in boundaries.windows(2) {
+            let range = chunk[0]..chunk[1];
+            let mut style = resolve_span_style(&source_span.style);
+            for decoration in decorations {
+                if decoration.bytes.start <= range.start && range.end <= decoration.bytes.end {
+                    style = style.patch(theme::style_by_name(&decoration.group));
+                }
+            }
+            let local = range.start - start..range.end - start;
+            spans.push(Span::styled(source_span.text[local].to_owned(), style));
+        }
+        start = end;
+    }
+    Some((Line::from(spans), spinners))
 }
 
 fn place_tool_body(mut tl: ToolLines, offset: usize) -> ToolBody {
@@ -430,9 +508,10 @@ mod tests {
 
     #[test]
     fn render_passes_lines_through_without_raw() {
-        let objects = vec![RenderObject::Lines(vec![SnapshotLine::plain(
-            "a".to_owned(),
-        )])];
+        let objects = vec![RenderObject::Lines {
+            lines: vec![SnapshotLine::plain("a".to_owned())],
+            decorations: Vec::new(),
+        }];
         let rendered = render(&objects).unwrap();
         let (lines, raw) = (rendered.lines, rendered.raw);
         assert_eq!(lines.len(), 1);
@@ -441,9 +520,61 @@ mod tests {
     }
 
     #[test]
+    fn render_applies_overlapping_decorations_in_order() {
+        let objects = vec![RenderObject::Lines {
+            lines: vec![SnapshotLine::plain("a界b".to_owned())],
+            decorations: vec![
+                Decoration {
+                    line: 0,
+                    bytes: 1..4,
+                    group: "tool".to_owned(),
+                },
+                Decoration {
+                    line: 0,
+                    bytes: 4..5,
+                    group: "error".to_owned(),
+                },
+            ],
+        }];
+        let rendered = render(&objects).expect("rendered");
+        assert_eq!(
+            rendered.lines[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["a", "界", "b"]
+        );
+        assert_eq!(
+            rendered.lines[0].spans[1].style,
+            theme::style_by_name("tool")
+        );
+        assert_eq!(
+            rendered.lines[0].spans[2].style,
+            theme::style_by_name("error")
+        );
+    }
+
+    #[test]
+    fn render_refuses_invalid_decoration_boundaries() {
+        let objects = vec![RenderObject::Lines {
+            lines: vec![SnapshotLine::plain("界".to_owned())],
+            decorations: vec![Decoration {
+                line: 0,
+                bytes: 1..3,
+                group: "tool".to_owned(),
+            }],
+        }];
+        assert!(render(&objects).is_none());
+    }
+
+    #[test]
     fn render_places_raw_after_the_lines_it_follows() {
         let objects = vec![
-            RenderObject::Lines(vec![SnapshotLine::plain("a".to_owned())]),
+            RenderObject::Lines {
+                lines: vec![SnapshotLine::plain("a".to_owned())],
+                decorations: Vec::new(),
+            },
             RenderObject::Raw {
                 seq: SGR_RED.to_owned(),
                 width: RAW_WIDTH,
@@ -537,9 +668,15 @@ mod tests {
     #[test]
     fn tool_body_metadata_is_shifted_by_the_lines_lua_puts_above_it() {
         let objects = vec![
-            RenderObject::Lines(vec![SnapshotLine::plain("above".to_owned())]),
+            RenderObject::Lines {
+                lines: vec![SnapshotLine::plain("above".to_owned())],
+                decorations: Vec::new(),
+            },
             RenderObject::ToolBody,
-            RenderObject::Lines(vec![SnapshotLine::plain("below".to_owned())]),
+            RenderObject::Lines {
+                lines: vec![SnapshotLine::plain("below".to_owned())],
+                decorations: Vec::new(),
+            },
         ];
         let rendered = render_with_tools(&objects, Some(tool_lines())).expect("body placed");
         assert_eq!(rendered.lines.len(), 5);
