@@ -194,6 +194,16 @@ fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serd
             let mut old_line = old_start;
             let mut new_line = new_start;
             let last_line = hunk.lines.len().saturating_sub(1);
+            let old_count = hunk
+                .lines
+                .iter()
+                .filter(|line| !matches!(line, DiffLine::Added(_)))
+                .count();
+            let new_count = hunk
+                .lines
+                .iter()
+                .filter(|line| !matches!(line, DiffLine::Removed(_)))
+                .count();
             let lines = hunk
                 .lines
                 .into_iter()
@@ -220,7 +230,7 @@ fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serd
                                 "kind": "remove",
                                 "text": spans.iter().map(|span| span.text.as_str()).collect::<String>(),
                                 "old_line": old_line,
-                                "emphasis": spans.iter().filter(|span| span.emphasized).map(|span| span.text.as_str()).collect::<Vec<_>>(),
+                                "emphasis": emphasis_ranges(&spans),
                                 "no_newline_at_eof": no_newline_at_eof,
                             });
                             old_line += 1;
@@ -231,7 +241,7 @@ fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serd
                                 "kind": "add",
                                 "text": spans.iter().map(|span| span.text.as_str()).collect::<String>(),
                                 "new_line": new_line,
-                                "emphasis": spans.iter().filter(|span| span.emphasized).map(|span| span.text.as_str()).collect::<Vec<_>>(),
+                                "emphasis": emphasis_ranges(&spans),
                                 "no_newline_at_eof": no_newline_at_eof,
                             });
                             new_line += 1;
@@ -242,7 +252,9 @@ fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serd
                 .collect::<Vec<_>>();
             serde_json::json!({
                 "old_start": old_start,
+                "old_count": old_count,
                 "new_start": new_start,
+                "new_count": new_count,
                 "lines": lines,
             })
         })
@@ -250,9 +262,38 @@ fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serd
     serde_json::json!({
         "path": path,
         "summary": summary,
+        "mode": if before.is_empty() { "new" } else if after.is_empty() { "delete" } else { "edit" },
         "hunks": hunks,
     })
 }
+fn emphasis_ranges(spans: &[maki_agent::diff::DiffSpan]) -> Vec<serde_json::Value> {
+    let mut offset = 0;
+    spans
+        .iter()
+        .filter_map(|span| {
+            let start_byte = offset;
+            offset += span.text.len();
+            span.emphasized.then(|| {
+                serde_json::json!({
+                    "start_byte": start_byte,
+                    "end_byte": offset,
+                    "kind": "changed",
+                })
+            })
+        })
+        .collect()
+}
+
+fn valid_match_ranges(line: &maki_agent::GrepLine) -> Option<&[std::ops::Range<usize>]> {
+    let valid = line.match_ranges.iter().all(|range| {
+        range.start <= range.end
+            && range.end <= line.text.len()
+            && line.text.is_char_boundary(range.start)
+            && line.text.is_char_boundary(range.end)
+    });
+    valid.then_some(&line.match_ranges)
+}
+
 fn grep_projection(entries: &[maki_agent::GrepFileEntry]) -> serde_json::Value {
     serde_json::json!({
         "entries": entries.iter().map(|entry| serde_json::json!({
@@ -263,10 +304,10 @@ fn grep_projection(entries: &[maki_agent::GrepFileEntry]) -> serde_json::Value {
                     "line": line.line_nr,
                     "text": line.text,
                     "is_match": line.is_match,
-                    "ranges": line.match_ranges.iter().map(|range| serde_json::json!({
-                        "start": range.start,
-                        "end": range.end,
-                    })).collect::<Vec<_>>(),
+                    "ranges": valid_match_ranges(line).map(|ranges| ranges.iter().map(|range| serde_json::json!({
+                        "start_byte": range.start,
+                        "end_byte": range.end,
+                    })).collect::<Vec<_>>()).unwrap_or_default(),
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
@@ -581,8 +622,11 @@ mod tests {
         let projection = diff_projection("src/lib.rs", "old\n", "new\n", "changed");
         assert_eq!(projection["path"], "src/lib.rs");
         let hunk = &projection["hunks"][0];
+        assert_eq!(projection["mode"], "edit");
         assert_eq!(hunk["old_start"], 1);
+        assert_eq!(hunk["old_count"], 1);
         assert_eq!(hunk["new_start"], 1);
+        assert_eq!(hunk["new_count"], 1);
         assert_eq!(hunk["lines"][0]["kind"], "remove");
         assert_eq!(hunk["lines"][0]["old_line"], 1);
         assert!(hunk["lines"][0].get("new_line").is_none());
@@ -607,7 +651,45 @@ mod tests {
         let line = &projection["entries"][0]["groups"][0]["lines"][0];
         assert_eq!(line["line"], 2);
         assert_eq!(line["text"], "héllo");
-        assert_eq!(line["ranges"], serde_json::json!([{"start": 1, "end": 3}]));
+        assert_eq!(
+            line["ranges"],
+            serde_json::json!([{"start_byte": 1, "end_byte": 3}])
+        );
+    }
+
+    #[test]
+    fn diff_projection_marks_empty_sides_and_missing_newline() {
+        let new_file = diff_projection("new", "", "é", "created");
+        let hunk = &new_file["hunks"][0];
+        assert_eq!(new_file["mode"], "new");
+        assert_eq!(hunk["old_start"], 0);
+        assert_eq!(hunk["old_count"], 0);
+        assert_eq!(hunk["new_start"], 1);
+        assert_eq!(hunk["new_count"], 1);
+        assert!(
+            hunk["lines"][0]["no_newline_at_eof"]
+                .as_bool()
+                .expect("no newline flag")
+        );
+    }
+
+    #[test]
+    fn grep_projection_drops_invalid_match_ranges() {
+        let line = maki_agent::GrepLine {
+            line_nr: 1,
+            text: "é".to_owned(),
+            is_match: true,
+            match_ranges: std::iter::once(1..2).collect(),
+        };
+        assert!(valid_match_ranges(&line).is_none());
+        let projection = grep_projection(&[maki_agent::GrepFileEntry {
+            path: "a".to_owned(),
+            groups: vec![maki_agent::GrepMatchGroup { lines: vec![line] }],
+        }]);
+        assert_eq!(
+            projection["entries"][0]["groups"][0]["lines"][0]["ranges"],
+            serde_json::json!([])
+        );
     }
 
     #[test_case(ToolStatus::InProgress => PHASE_IN_PROGRESS ; "in_progress")]
