@@ -14,6 +14,7 @@ tracing = { workspace = true }
 ignore = { workspace = true }
 strum = { workspace = true }
 maki-storage = { workspace = true }
+grep-matcher = { workspace = true }
 grep-regex = { workspace = true }
 grep-searcher = { workspace = true }
 similar = { workspace = true }

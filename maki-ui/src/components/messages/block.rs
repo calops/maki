@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ratatui::text::{Line, Span};
 
 use maki_agent::types::InlineStyle;
-use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle};
+use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle, ToolOutput, diff::DiffLine};
 use maki_lua::{Decoration, RenderObject};
 
 use super::raw;
@@ -158,7 +158,119 @@ fn tool_block(message: &DisplayMessage, name: &str) -> serde_json::Value {
         }
     }
     tool.insert("header".into(), header);
+    if let Some(output) = &message.tool_output {
+        match output.as_ref() {
+            ToolOutput::Diff {
+                path,
+                before,
+                after,
+                summary,
+            } => {
+                tool.insert("diff".into(), diff_projection(path, before, after, summary));
+            }
+            ToolOutput::GrepResult { entries } => {
+                tool.insert("grep".into(), grep_projection(entries));
+            }
+            _ => {}
+        }
+    }
     serde_json::Value::Object(tool)
+}
+
+fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serde_json::Value {
+    let hunks = maki_agent::diff::compute_hunks(before, after)
+        .into_iter()
+        .map(|hunk| {
+            let has_old = hunk
+                .lines
+                .iter()
+                .any(|line| !matches!(line, DiffLine::Added(_)));
+            let has_new = hunk
+                .lines
+                .iter()
+                .any(|line| !matches!(line, DiffLine::Removed(_)));
+            let old_start = if has_old { hunk.before_start } else { 0 };
+            let new_start = if has_new { hunk.after_start } else { 0 };
+            let mut old_line = old_start;
+            let mut new_line = new_start;
+            let last_line = hunk.lines.len().saturating_sub(1);
+            let lines = hunk
+                .lines
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let no_newline_at_eof = index == last_line
+                        && ((has_old && !before.ends_with('\n'))
+                            || (has_new && !after.ends_with('\n')));
+                    match line {
+                        DiffLine::Unchanged(text) => {
+                            let line = serde_json::json!({
+                                "kind": "context",
+                                "text": text,
+                                "old_line": old_line,
+                                "new_line": new_line,
+                                "no_newline_at_eof": no_newline_at_eof,
+                            });
+                            old_line += 1;
+                            new_line += 1;
+                            line
+                        }
+                        DiffLine::Removed(spans) => {
+                            let line = serde_json::json!({
+                                "kind": "remove",
+                                "text": spans.iter().map(|span| span.text.as_str()).collect::<String>(),
+                                "old_line": old_line,
+                                "emphasis": spans.iter().filter(|span| span.emphasized).map(|span| span.text.as_str()).collect::<Vec<_>>(),
+                                "no_newline_at_eof": no_newline_at_eof,
+                            });
+                            old_line += 1;
+                            line
+                        }
+                        DiffLine::Added(spans) => {
+                            let line = serde_json::json!({
+                                "kind": "add",
+                                "text": spans.iter().map(|span| span.text.as_str()).collect::<String>(),
+                                "new_line": new_line,
+                                "emphasis": spans.iter().filter(|span| span.emphasized).map(|span| span.text.as_str()).collect::<Vec<_>>(),
+                                "no_newline_at_eof": no_newline_at_eof,
+                            });
+                            new_line += 1;
+                            line
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "old_start": old_start,
+                "new_start": new_start,
+                "lines": lines,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "path": path,
+        "summary": summary,
+        "hunks": hunks,
+    })
+}
+fn grep_projection(entries: &[maki_agent::GrepFileEntry]) -> serde_json::Value {
+    serde_json::json!({
+        "entries": entries.iter().map(|entry| serde_json::json!({
+            "path": entry.path,
+            "display": entry.path,
+            "groups": entry.groups.iter().map(|group| serde_json::json!({
+                "lines": group.lines.iter().map(|line| serde_json::json!({
+                    "line": line.line_nr,
+                    "text": line.text,
+                    "is_match": line.is_match,
+                    "ranges": line.match_ranges.iter().map(|range| serde_json::json!({
+                        "start": range.start,
+                        "end": range.end,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// A snapshot line in the same `{text, style?}` span shape the Lua span
@@ -462,6 +574,40 @@ mod tests {
         assert_eq!(images[0]["media_type"], ImageMediaType::Png.mime());
         assert_eq!(images[0]["bytes"], PNG_PAYLOAD.len());
         assert!(!block.to_string().contains(PNG_PAYLOAD));
+    }
+
+    #[test]
+    fn diff_projection_uses_unified_line_conventions() {
+        let projection = diff_projection("src/lib.rs", "old\n", "new\n", "changed");
+        assert_eq!(projection["path"], "src/lib.rs");
+        let hunk = &projection["hunks"][0];
+        assert_eq!(hunk["old_start"], 1);
+        assert_eq!(hunk["new_start"], 1);
+        assert_eq!(hunk["lines"][0]["kind"], "remove");
+        assert_eq!(hunk["lines"][0]["old_line"], 1);
+        assert!(hunk["lines"][0].get("new_line").is_none());
+        assert_eq!(hunk["lines"][1]["kind"], "add");
+        assert_eq!(hunk["lines"][1]["new_line"], 1);
+        assert!(hunk["lines"][1].get("old_line").is_none());
+    }
+
+    #[test]
+    fn grep_projection_preserves_source_match_ranges() {
+        let projection = grep_projection(&[maki_agent::GrepFileEntry {
+            path: "src/lib.rs".to_owned(),
+            groups: vec![maki_agent::GrepMatchGroup {
+                lines: vec![maki_agent::GrepLine {
+                    line_nr: 2,
+                    text: "héllo".to_owned(),
+                    is_match: true,
+                    match_ranges: std::iter::once(1..3).collect(),
+                }],
+            }],
+        }]);
+        let line = &projection["entries"][0]["groups"][0]["lines"][0];
+        assert_eq!(line["line"], 2);
+        assert_eq!(line["text"], "héllo");
+        assert_eq!(line["ranges"], serde_json::json!([{"start": 1, "end": 3}]));
     }
 
     #[test_case(ToolStatus::InProgress => PHASE_IN_PROGRESS ; "in_progress")]

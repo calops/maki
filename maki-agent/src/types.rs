@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::fmt::Write;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,6 +33,7 @@ pub struct GrepLine {
     pub line_nr: usize,
     pub text: String,
     pub is_match: bool,
+    pub match_ranges: Vec<Range<usize>>,
 }
 
 impl GrepLine {
@@ -40,6 +42,7 @@ impl GrepLine {
             line_nr,
             text: text.into(),
             is_match: true,
+            match_ranges: Vec::new(),
         }
     }
 
@@ -48,6 +51,7 @@ impl GrepLine {
             line_nr,
             text: text.into(),
             is_match: false,
+            match_ranges: Vec::new(),
         }
     }
 }

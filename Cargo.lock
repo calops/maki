@@ -2726,6 +2726,7 @@ dependencies = [
  "flume 0.11.1",
  "futures-lite",
  "getrandom 0.3.4",
+ "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "humantime",

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{GrepFileEntry, GrepLine, GrepMatchGroup};
+use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
 use grep_searcher::Searcher;
 use grep_searcher::SearcherBuilder;
@@ -117,6 +118,7 @@ pub fn grep_search(params: GrepParams) -> Result<(PathBuf, Vec<GrepFileEntry>), 
                     current_group: Vec::new(),
                     max_line_bytes,
                     has_context,
+                    matcher: &matcher,
                 };
                 let _ = searcher.search_path(&*matcher, &path, &mut sink);
 
@@ -163,6 +165,7 @@ struct GrepSink<'a> {
     current_group: Vec<GrepLine>,
     max_line_bytes: usize,
     has_context: bool,
+    matcher: &'a RegexMatcher,
 }
 
 impl GrepSink<'_> {
@@ -178,10 +181,19 @@ impl GrepSink<'_> {
         let text = String::from_utf8_lossy(bytes);
         let text = text.strip_suffix('\n').unwrap_or(&text);
         let text = text.strip_suffix('\r').unwrap_or(text);
+        let text = truncate_bytes(text, self.max_line_bytes);
+        let mut match_ranges = Vec::new();
+        if is_match {
+            let _ = self.matcher.find_iter(text.as_bytes(), |matched| {
+                match_ranges.push(matched.start()..matched.end());
+                true
+            });
+        }
         self.current_group.push(GrepLine {
             line_nr: line_nr as usize,
-            text: truncate_bytes(text, self.max_line_bytes),
+            text,
             is_match,
+            match_ranges,
         });
     }
 }
