@@ -2949,7 +2949,7 @@ fn lua_block_lines(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
     let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
         .expect("every bundled plugin loads");
     let reply = host.event_handle().request_render_block(
-        block::project(message),
+        block::project_with_tool_display(message, usize::MAX, true),
         RenderCtx {
             width,
             mode: Arc::from("build"),
@@ -2983,7 +2983,7 @@ fn block_objects(
             .expect("fixture loads");
     }
     let reply = host.event_handle().request_render_block(
-        block::project(message),
+        block::project_with_tool_display(message, usize::MAX, true),
         RenderCtx {
             width,
             mode: Arc::from("build"),
@@ -3123,6 +3123,134 @@ fn lua_tool_header_matches_native_across_widths(width: u16) {
         let message = tool_message_with(status, Some("12 files"), Some("1.2k"), Some("12:00"));
         assert_tool_parity(&message, status, width);
     }
+}
+
+#[test_case("" ; "empty")]
+#[test_case("one\ntwo" ; "multiline")]
+fn lua_static_plain_body_matches_native(text: &str) {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    for status in [
+        ToolStatus::InProgress,
+        ToolStatus::Success,
+        ToolStatus::Error,
+    ] {
+        for width in [24, 80, 200] {
+            let mut message =
+                tool_message_with(status, Some("2 lines"), Some("1.2k"), Some("12:00"));
+            message.tool_output = Some(Arc::new(ToolOutput::Plain(text.into())));
+            let output_lines = maki_config::ToolOutputLines::default();
+            let rctx = crate::components::tool_display::RenderCtx {
+                started_at: Instant::now(),
+                width,
+                tool_output_lines: &output_lines,
+            };
+            let native = MessagesPanel::build_tool_segment_lines(
+                &message,
+                status,
+                &rctx,
+                SectionFlags {
+                    script: false,
+                    output: true,
+                },
+            );
+            let objects = block_objects(&message, width, None);
+            let rendered = block::render(&objects).expect("static Lua body");
+            assert!(
+                rendered.tool.is_none(),
+                "static body must not use native marker"
+            );
+            assert_eq!(
+                composed(rendered),
+                with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+                "status={status:?} width={width}"
+            );
+        }
+    }
+}
+
+#[test_case(ToolOutput::ReadDir("one\ntwo".into()) ; "read_dir")]
+#[test_case(ToolOutput::Batch { text: "one\ntwo".to_owned() } ; "batch")]
+fn lua_static_text_body_matches_native(output: ToolOutput) {
+    const THEME: &str = "dracula";
+    theme::set(theme::load_by_name(THEME).expect(THEME));
+    for status in [
+        ToolStatus::InProgress,
+        ToolStatus::Success,
+        ToolStatus::Error,
+    ] {
+        for width in [24, 80, 200] {
+            let mut message =
+                tool_message_with(status, Some("2 lines"), Some("1.2k"), Some("12:00"));
+            message.tool_output = Some(Arc::new(output.clone()));
+            let output_lines = maki_config::ToolOutputLines::default();
+            let rctx = crate::components::tool_display::RenderCtx {
+                started_at: Instant::now(),
+                width,
+                tool_output_lines: &output_lines,
+            };
+            let native = MessagesPanel::build_tool_segment_lines(
+                &message,
+                status,
+                &rctx,
+                SectionFlags {
+                    script: false,
+                    output: true,
+                },
+            );
+            let objects = block_objects(&message, width, None);
+            let rendered = block::render(&objects).expect("static Lua body");
+            assert!(
+                rendered.tool.is_none(),
+                "static body must not use native marker"
+            );
+            assert_eq!(
+                composed(rendered),
+                with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+                "status={status:?} width={width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lua_tool_uses_native_marker_for_collapsed_plain_body() {
+    let mut message = tool_message();
+    message.tool_output = Some(Arc::new(ToolOutput::Plain("one\ntwo".into())));
+    let objects = {
+        const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+        let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+        let reply = host.event_handle().request_render_block(
+            block::project_with_tool_display(&message, 1, false),
+            RenderCtx {
+                width: 80,
+                mode: Arc::from("build"),
+                theme_gen: theme::generation(),
+            },
+        );
+        let BlockRender::Objects(objects) = reply.recv_timeout(REPLY_TIMEOUT).expect("reply")
+        else {
+            panic!("objects");
+        };
+        objects
+    };
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    );
+}
+
+#[test]
+fn lua_tool_uses_native_marker_for_todo_body() {
+    let mut message = tool_message();
+    message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![])));
+    let objects = block_objects(&message, 80, None);
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    );
 }
 
 /// An in-progress header carries the semantic spinner, which the panel

@@ -103,6 +103,30 @@ end
 -- The tool header plus the host's body, with the indicator, prefix, header
 -- text (or snapshot spans), annotation and right-info drawn natively. Returns
 -- nil when the block carries no structured header, so the caller falls back.
+local function tool_body(body)
+  if not body then
+    return nil
+  end
+  local display = body.display
+  if not (display and display.expanded and not display.truncation) then
+    return nil
+  end
+  if body.kind == "todo_list" then
+    return nil
+  end
+  if body.kind ~= "plain" and body.kind ~= "read_dir" and body.kind ~= "batch" then
+    return nil
+  end
+  if body.text == "" then
+    return {}
+  end
+  local lines = {}
+  for line in (body.text .. "\n"):gmatch(BREAK_LINE) do
+    lines[#lines + 1] = { { "  ", "assistant" }, { line, "assistant" } }
+  end
+  return lines
+end
+
 local function tool_lines(block, ctx)
   local tool = block.tool
   local header = tool and tool.header
@@ -132,7 +156,15 @@ local function tool_lines(block, ctx)
   if tool.timestamp then
     maki.ui.right_info(spans, tool.usage, tool.timestamp, ctx.width)
   end
-  return { spans, maki.ui.transcript_tool() }
+  local body = tool_body(tool.body)
+  if not body then
+    return { spans, maki.ui.transcript_tool() }
+  end
+  local out = { spans }
+  for _, line in ipairs(body) do
+    out[#out + 1] = line
+  end
+  return out
 end
 
 maki.ui.set_block_renderer(function(prev, block, ctx)
