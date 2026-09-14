@@ -504,6 +504,10 @@ pub(crate) fn ui_style(style: Style) -> UiStyle {
         dim: on(Modifier::DIM),
         strikethrough: on(Modifier::CROSSED_OUT),
         reversed: on(Modifier::REVERSED),
+        hidden: on(Modifier::HIDDEN),
+        slow_blink: on(Modifier::SLOW_BLINK),
+        rapid_blink: on(Modifier::RAPID_BLINK),
+        underline_color: style.underline_color.map(segment_color),
     }
 }
 
@@ -710,6 +714,9 @@ fn resolve_modifier(name: &str) -> Modifier {
         "crossed_out" => Modifier::CROSSED_OUT,
         "dim" => Modifier::DIM,
         "reversed" => Modifier::REVERSED,
+        "hidden" => Modifier::HIDDEN,
+        "slow_blink" => Modifier::SLOW_BLINK,
+        "rapid_blink" => Modifier::RAPID_BLINK,
         _ => Modifier::empty(),
     }
 }
@@ -1438,6 +1445,30 @@ diff_new_line_nr = { fg = "red" }
                 "unresolved style name: {name}"
             );
         }
+    }
+
+    /// If ratatui grows a modifier, `ui_style` has to carry it or
+    /// `maki.ui.theme_style` drops it without a word.
+    #[test]
+    fn ui_style_captures_every_modifier() {
+        let ui = ui_style(Style::new().add_modifier(Modifier::all()));
+        let mut captured = Modifier::empty();
+        for (on, modifier) in [
+            (ui.bold, Modifier::BOLD),
+            (ui.italic, Modifier::ITALIC),
+            (ui.underline, Modifier::UNDERLINED),
+            (ui.dim, Modifier::DIM),
+            (ui.strikethrough, Modifier::CROSSED_OUT),
+            (ui.reversed, Modifier::REVERSED),
+            (ui.hidden, Modifier::HIDDEN),
+            (ui.slow_blink, Modifier::SLOW_BLINK),
+            (ui.rapid_blink, Modifier::RAPID_BLINK),
+        ] {
+            if on {
+                captured |= modifier;
+            }
+        }
+        assert_eq!(captured, Modifier::all());
     }
 
     #[test]

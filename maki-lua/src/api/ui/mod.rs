@@ -142,10 +142,11 @@ fn theme_color(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
 /// then adjust, e.g. to add a modifier the theme does not set.
 ///
 /// The name is the same one a span style string takes, such as `"tool_success"`
-/// or `"accent"`. The table holds the resolved `fg`/`bg` and only the modifiers
-/// that are on (`bold`, `italic`, `underline`, `dim`, `strikethrough`,
-/// `reversed`), so you can set or clear any before returning it. Unlike
-/// `theme_color`, it keeps modifiers and knows the host's UI name set.
+/// or `"accent"`. The table holds the resolved `fg`/`bg` and `underline_color`,
+/// and only the modifiers that are on (`bold`, `italic`, `underline`, `dim`,
+/// `strikethrough`, `reversed`, `hidden`, `slow_blink`, `rapid_blink`), so you
+/// can set or clear any before returning it. Unlike `theme_color`, it keeps
+/// modifiers and knows the host's UI name set.
 ///
 /// @param name string A named theme style, e.g. "tool_success".
 /// @return (table|nil) A span style table, or nil when the name is unknown.
@@ -1664,6 +1665,10 @@ mod tests {
             UiStyle {
                 fg: Some(SegmentColor::Ansi(2)),
                 bold: true,
+                hidden: true,
+                slow_blink: true,
+                rapid_blink: true,
+                underline_color: Some(SegmentColor::Ansi(3)),
                 ..UiStyle::default()
             },
         )]));
@@ -1673,7 +1678,11 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(style.get::<String>("fg").unwrap(), "2");
+        assert_eq!(style.get::<String>("underline_color").unwrap(), "3");
         assert!(style.get::<bool>("bold").unwrap());
+        assert!(style.get::<bool>("hidden").unwrap());
+        assert!(style.get::<bool>("slow_blink").unwrap());
+        assert!(style.get::<bool>("rapid_blink").unwrap());
         assert!(style.get::<Option<bool>>("italic").unwrap().is_none());
         let unknown: Value = lua.load(r#"return ui.theme_style("nope")"#).eval().unwrap();
         assert!(matches!(unknown, Value::Nil));

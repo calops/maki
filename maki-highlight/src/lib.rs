@@ -83,6 +83,10 @@ pub struct UiStyle {
     pub dim: bool,
     pub strikethrough: bool,
     pub reversed: bool,
+    pub hidden: bool,
+    pub slow_blink: bool,
+    pub rapid_blink: bool,
+    pub underline_color: Option<SegmentColor>,
 }
 
 /// Rejects the `+4` and `-0` that `u8::from_str` would otherwise accept, and

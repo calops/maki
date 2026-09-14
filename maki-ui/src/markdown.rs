@@ -300,6 +300,10 @@ fn snapshot_style(style: Style) -> InlineStyle {
         dim: on(Modifier::DIM),
         strikethrough: on(Modifier::CROSSED_OUT),
         reversed: on(Modifier::REVERSED),
+        hidden: on(Modifier::HIDDEN),
+        slow_blink: on(Modifier::SLOW_BLINK),
+        rapid_blink: on(Modifier::RAPID_BLINK),
+        underline_color: style.underline_color.map(snapshot_color),
     }
 }
 
@@ -676,5 +680,29 @@ mod tests {
             code.style.add_modifier.contains(Modifier::BOLD),
             "inline code inside bold should inherit BOLD modifier"
         );
+    }
+
+    /// The markdown bridge hands styles to Lua, so dropping a ratatui modifier
+    /// here would make the Lua lines differ from the native ones.
+    #[test]
+    fn snapshot_style_captures_every_modifier() {
+        let inline = snapshot_style(Style::new().add_modifier(Modifier::all()));
+        let mut captured = Modifier::empty();
+        for (on, modifier) in [
+            (inline.bold, Modifier::BOLD),
+            (inline.italic, Modifier::ITALIC),
+            (inline.underline, Modifier::UNDERLINED),
+            (inline.dim, Modifier::DIM),
+            (inline.strikethrough, Modifier::CROSSED_OUT),
+            (inline.reversed, Modifier::REVERSED),
+            (inline.hidden, Modifier::HIDDEN),
+            (inline.slow_blink, Modifier::SLOW_BLINK),
+            (inline.rapid_blink, Modifier::RAPID_BLINK),
+        ] {
+            if on {
+                captured |= modifier;
+            }
+        }
+        assert_eq!(captured, Modifier::all());
     }
 }

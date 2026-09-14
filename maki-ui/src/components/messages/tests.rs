@@ -3031,7 +3031,7 @@ fn lua_user_renderer_matches_the_rust_lines() {
     assert_role_markdown_parity(DisplayRole::User);
 }
 
-/// The reason `theme_style` exists over `theme_color`: a modifier the theme
+/// The reason `theme_style` exists over `theme_color`: every modifier the theme
 /// puts on the success style has to survive the Lua round trip too.
 #[test]
 fn lua_done_renderer_keeps_a_themed_modifier() {
@@ -3041,13 +3041,31 @@ ok = "#00ff00"
 
 [ui.tool_success]
 fg = "ok"
-modifiers = ["italic", "underlined"]
+modifiers = ["italic", "underlined", "hidden", "slow_blink", "rapid_blink"]
 "##;
     theme::set(theme::Theme::from_toml(THEMED).expect("theme must parse"));
     let message = DisplayMessage::new(DisplayRole::Done, "Done!".to_owned());
     assert_eq!(
         lua_block_lines(&message, DONE_WIDTH),
         build_message_lines(&message, DONE_WIDTH)
+    );
+}
+
+/// The markdown bridge must carry the same modifier set as `theme_style`, so a
+/// themed role style survives the native renderer -> Lua -> span round trip.
+#[test]
+fn lua_assistant_renderer_keeps_themed_blink_and_hidden() {
+    const THEMED: &str = r##"
+[ui.assistant]
+fg = "green"
+modifiers = ["underlined", "hidden", "slow_blink", "rapid_blink"]
+"##;
+    theme::set(theme::Theme::from_toml(THEMED).expect("theme must parse"));
+    let message = DisplayMessage::new(DisplayRole::Assistant, "hello **world**".to_owned());
+    let width = 60;
+    assert_eq!(
+        lua_block_lines(&message, width),
+        build_message_lines(&message, width)
     );
 }
 

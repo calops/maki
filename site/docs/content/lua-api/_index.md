@@ -4965,10 +4965,11 @@ Returns a named theme style as a style table you can pass to a span and
 then adjust, e.g. to add a modifier the theme does not set.
 
 The name is the same one a span style string takes, such as `"tool_success"`
-or `"accent"`. The table holds the resolved `fg`/`bg` and only the modifiers
-that are on (`bold`, `italic`, `underline`, `dim`, `strikethrough`,
-`reversed`), so you can set or clear any before returning it. Unlike
-`theme_color`, it keeps modifiers and knows the host's UI name set.
+or `"accent"`. The table holds the resolved `fg`/`bg` and `underline_color`,
+and only the modifiers that are on (`bold`, `italic`, `underline`, `dim`,
+`strikethrough`, `reversed`, `hidden`, `slow_blink`, `rapid_blink`), so you
+can set or clear any before returning it. Unlike `theme_color`, it keeps
+modifiers and knows the host's UI name set.
 
 **Parameters:**
 
@@ -5723,7 +5724,9 @@ Buf:line({line})
 Appends a single line to the end of the buffer. You can pass a
 plain string for unstyled text, or a table of `{text, style?}` spans
 for rich content. Style can be a named string like "bold" or
-"keyword", or an inline table `{fg?, bg?, bold?, italic?, underline?, dim?, strikethrough?, reversed?}`.
+"keyword", or an inline table `{fg?, bg?, underline_color?, bold?, italic?,
+underline?, dim?, strikethrough?, reversed?, hidden?, slow_blink?,
+rapid_blink?}`.
 Colors accept "#rrggbb", a terminal color name like "blue" or "light-gray",
 or a palette index as a string like "4". Names must be spelled exactly,
 hyphens included. Named and indexed colors are left for the terminal to

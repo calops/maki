@@ -925,6 +925,14 @@ pub struct InlineStyle {
     pub dim: bool,
     pub strikethrough: bool,
     pub reversed: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub slow_blink: bool,
+    #[serde(default)]
+    pub rapid_blink: bool,
+    #[serde(default)]
+    pub underline_color: Option<SpanColor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1569,6 +1577,7 @@ mod tests {
         dim: false,
         strikethrough: false,
         reversed: true,
+        ..InlineStyle::default()
     }) ; "inline")]
     fn snapshot_span_serde_roundtrip(style: SpanStyle) {
         let span = SnapshotSpan {

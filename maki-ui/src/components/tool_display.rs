@@ -611,6 +611,18 @@ pub(crate) fn resolve_span_style(style: &SpanStyle) -> Style {
             if inline.reversed {
                 s = s.reversed();
             }
+            if inline.hidden {
+                s = s.hidden();
+            }
+            if inline.slow_blink {
+                s = s.slow_blink();
+            }
+            if inline.rapid_blink {
+                s = s.rapid_blink();
+            }
+            if let Some(underline_color) = inline.underline_color {
+                s = s.underline_color(span_color(underline_color));
+            }
             s
         }
     }
@@ -1769,10 +1781,15 @@ mod tests {
             dim: true,
             strikethrough: true,
             reversed: true,
+            hidden: true,
+            slow_blink: true,
+            rapid_blink: true,
+            underline_color: Some(SpanColor::Rgb((70, 80, 90))),
         });
         let resolved = resolve_span_style(&style);
         assert_eq!(resolved.fg, Some(Color::Rgb(10, 20, 30)));
         assert_eq!(resolved.bg, Some(Color::Rgb(40, 50, 60)));
+        assert_eq!(resolved.underline_color, Some(Color::Rgb(70, 80, 90)));
         use ratatui::style::Modifier;
         assert!(resolved.add_modifier.contains(Modifier::BOLD));
         assert!(resolved.add_modifier.contains(Modifier::ITALIC));
@@ -1780,6 +1797,9 @@ mod tests {
         assert!(resolved.add_modifier.contains(Modifier::DIM));
         assert!(resolved.add_modifier.contains(Modifier::CROSSED_OUT));
         assert!(resolved.add_modifier.contains(Modifier::REVERSED));
+        assert!(resolved.add_modifier.contains(Modifier::HIDDEN));
+        assert!(resolved.add_modifier.contains(Modifier::SLOW_BLINK));
+        assert!(resolved.add_modifier.contains(Modifier::RAPID_BLINK));
     }
 
     /// An explicit terminal default resolves to `Color::Reset`, kept distinct

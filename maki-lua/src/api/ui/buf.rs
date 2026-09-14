@@ -150,7 +150,9 @@ pub(crate) fn buf_from_reply(val: &LuaValue) -> Option<Arc<SharedBuf>> {
 /// Appends a single line to the end of the buffer. You can pass a
 /// plain string for unstyled text, or a table of `{text, style?}` spans
 /// for rich content. Style can be a named string like "bold" or
-/// "keyword", or an inline table `{fg?, bg?, bold?, italic?, underline?, dim?, strikethrough?, reversed?}`.
+/// "keyword", or an inline table `{fg?, bg?, underline_color?, bold?, italic?,
+/// underline?, dim?, strikethrough?, reversed?, hidden?, slow_blink?,
+/// rapid_blink?}`.
 /// Colors accept "#rrggbb", a terminal color name like "blue" or "light-gray",
 /// or a palette index as a string like "4". Names must be spelled exactly,
 /// hyphens included. Named and indexed colors are left for the terminal to
@@ -434,12 +436,19 @@ pub(crate) fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
             if let Ok(LuaValue::String(s)) = t.raw_get::<LuaValue>("bg") {
                 inline.bg = parse_span_color(&s.to_str().map_err(mlua::Error::external)?);
             }
+            if let Ok(LuaValue::String(s)) = t.raw_get::<LuaValue>("underline_color") {
+                inline.underline_color =
+                    parse_span_color(&s.to_str().map_err(mlua::Error::external)?);
+            }
             inline.bold = t.raw_get::<bool>("bold").unwrap_or(false);
             inline.italic = t.raw_get::<bool>("italic").unwrap_or(false);
             inline.underline = t.raw_get::<bool>("underline").unwrap_or(false);
             inline.dim = t.raw_get::<bool>("dim").unwrap_or(false);
             inline.strikethrough = t.raw_get::<bool>("strikethrough").unwrap_or(false);
             inline.reversed = t.raw_get::<bool>("reversed").unwrap_or(false);
+            inline.hidden = t.raw_get::<bool>("hidden").unwrap_or(false);
+            inline.slow_blink = t.raw_get::<bool>("slow_blink").unwrap_or(false);
+            inline.rapid_blink = t.raw_get::<bool>("rapid_blink").unwrap_or(false);
             Ok(SpanStyle::Inline(inline))
         }
         _ => Err(mlua::Error::runtime(
@@ -475,6 +484,12 @@ fn inline_to_lua(lua: &Lua, inline: &InlineStyle) -> LuaResult<Table> {
     if let Some(c) = inline.bg {
         tbl.raw_set("bg", segment_color_to_lua(segment_color_from_span(c)))?;
     }
+    if let Some(c) = inline.underline_color {
+        tbl.raw_set(
+            "underline_color",
+            segment_color_to_lua(segment_color_from_span(c)),
+        )?;
+    }
     for (key, on) in [
         ("bold", inline.bold),
         ("italic", inline.italic),
@@ -482,6 +497,9 @@ fn inline_to_lua(lua: &Lua, inline: &InlineStyle) -> LuaResult<Table> {
         ("dim", inline.dim),
         ("strikethrough", inline.strikethrough),
         ("reversed", inline.reversed),
+        ("hidden", inline.hidden),
+        ("slow_blink", inline.slow_blink),
+        ("rapid_blink", inline.rapid_blink),
     ] {
         if on {
             tbl.raw_set(key, true)?;
@@ -502,6 +520,10 @@ pub(crate) fn ui_style_to_lua(lua: &Lua, style: &UiStyle) -> LuaResult<Table> {
         dim: style.dim,
         strikethrough: style.strikethrough,
         reversed: style.reversed,
+        hidden: style.hidden,
+        slow_blink: style.slow_blink,
+        rapid_blink: style.rapid_blink,
+        underline_color: style.underline_color.map(span_color_from_segment),
     };
     inline_to_lua(lua, &inline)
 }
