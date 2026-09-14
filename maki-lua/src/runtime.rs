@@ -3608,10 +3608,10 @@ pub fn spawn(
                         Request::RenderBlock { block, ctx, reply } => {
                             let result = match json_to_lua(&rt.lua, &block) {
                                 Ok(block) => match render::ctx_to_lua(&rt.lua, &ctx) {
-                                    Ok(ctx) => render::render_block(&rt.lua, block, ctx),
-                                    Err(error) => BlockRender::Failed(error.to_string()),
+                                    Ok(ctx) => render::render_block(&rt.lua, block, ctx).await,
+                                    Err(error) => render::failed(error.to_string()),
                                 },
-                                Err(error) => BlockRender::Failed(error.to_string()),
+                                Err(error) => render::failed(error.to_string()),
                             };
                             let _ = reply.send(result);
                         }

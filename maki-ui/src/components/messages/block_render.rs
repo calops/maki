@@ -98,9 +98,10 @@ impl BlockRenderCache {
         )
     }
 
-    /// Applies every finished answer. Reports whether anything changed,
-    /// so the caller can mark the frame dirty.
-    pub(crate) fn poll(&mut self) -> bool {
+    /// Applies every finished answer, calling `on_failure` with the plugin and
+    /// message of each accepted failure so the caller can surface it. Reports
+    /// whether anything changed, so the caller can mark the frame dirty.
+    pub(crate) fn poll(&mut self, mut on_failure: impl FnMut(&Arc<str>, u64, &str)) -> bool {
         let mut changed = false;
         for entry in self.entries.values_mut() {
             let State::Pending(rx) = &entry.state else {
@@ -109,9 +110,14 @@ impl BlockRenderCache {
             let Ok(result) = rx.try_recv() else {
                 continue;
             };
+            let generation = entry.key.generation;
             entry.state = match result {
                 BlockRender::Objects(objects) => State::Ready(objects),
-                BlockRender::Unhandled | BlockRender::Failed(_) => State::Skipped,
+                BlockRender::Unhandled => State::Skipped,
+                BlockRender::Failed { plugin, message } => {
+                    on_failure(&plugin, generation, &message);
+                    State::Skipped
+                }
             };
             changed = true;
         }
@@ -148,6 +154,8 @@ impl BlockRenderCache {
 mod tests {
     use super::*;
     use maki_agent::SnapshotLine;
+
+    const FAILURE_MESSAGE: &str = "renderer boom";
 
     fn key(width: u16) -> RenderKey {
         key_gen(width, 7)
@@ -217,7 +225,7 @@ mod tests {
         let id = BlockId::new(1);
         object(id, &mut cache, 1, "user");
         assert!(cache.objects(id, 1, &key(40)).is_none());
-        assert!(cache.poll());
+        assert!(cache.poll(|_, _, _| {}));
         assert_eq!(text(cache.objects(id, 1, &key(40)).unwrap()), "user");
     }
 
@@ -226,7 +234,7 @@ mod tests {
         let mut cache = BlockRenderCache::default();
         let id = BlockId::new(1);
         object(id, &mut cache, 1, "first");
-        cache.poll();
+        cache.poll(|_, _, _| {});
         object(id, &mut cache, 1, "second");
         assert_eq!(text(cache.objects(id, 1, &key(40)).unwrap()), "first");
     }
@@ -246,7 +254,7 @@ mod tests {
         object(id, &mut cache, 2, "new");
         // The superseded revision's reply has nowhere to land.
         assert!(tx.send(BlockRender::Objects(Vec::new())).is_err());
-        assert!(cache.poll());
+        assert!(cache.poll(|_, _, _| {}));
         assert_eq!(text(cache.objects(id, 2, &key(40)).unwrap()), "new");
         assert!(cache.objects(id, 1, &key(40)).is_none());
     }
@@ -256,7 +264,7 @@ mod tests {
         let mut cache = BlockRenderCache::default();
         let id = BlockId::new(1);
         object(id, &mut cache, 1, "narrow");
-        cache.poll();
+        cache.poll(|_, _, _| {});
         cache.request(
             id,
             1,
@@ -265,7 +273,7 @@ mod tests {
             send_object,
         );
         assert!(cache.objects(id, 1, &key(80)).is_none());
-        assert!(cache.poll());
+        assert!(cache.poll(|_, _, _| {}));
         assert_eq!(text(cache.objects(id, 1, &key(80)).unwrap()), "wide");
     }
 
@@ -285,7 +293,7 @@ mod tests {
                 rx
             },
         );
-        cache.poll();
+        cache.poll(|_, _, _| {});
         let counter2 = Arc::clone(&retried);
         cache.request(
             id,
@@ -299,6 +307,35 @@ mod tests {
         );
         assert_eq!(retried.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert!(cache.objects(id, 1, &key(40)).is_none());
+    }
+
+    #[test]
+    fn failure_reaches_the_callback_with_its_generation() {
+        let mut cache = BlockRenderCache::default();
+        let id = BlockId::new(1);
+        let plugin: Arc<str> = Arc::from("renderer");
+        let sent_plugin = Arc::clone(&plugin);
+        cache.request(
+            id,
+            1,
+            serde_json::json!({"kind": "user"}),
+            key_gen(40, 9),
+            move |_, _| {
+                let (tx, rx) = flume::bounded(1);
+                tx.send(BlockRender::Failed {
+                    plugin: sent_plugin,
+                    message: FAILURE_MESSAGE.to_owned(),
+                })
+                .expect("reply");
+                rx
+            },
+        );
+        let mut seen = Vec::new();
+        assert!(cache.poll(|plugin, generation, message| {
+            seen.push((Arc::clone(plugin), generation, message.to_owned()));
+        }));
+        assert_eq!(seen, vec![(plugin, 9, FAILURE_MESSAGE.to_owned())]);
+        assert!(cache.objects(id, 1, &key_gen(40, 9)).is_none());
     }
 
     #[test]
@@ -316,10 +353,10 @@ mod tests {
                 rx
             },
         );
-        cache.poll();
+        cache.poll(|_, _, _| {});
         assert!(cache.objects(id, 1, &key_gen(40, 7)).is_none());
         object_with(id, &mut cache, 1, "user", key_gen(40, 8));
-        assert!(cache.poll());
+        assert!(cache.poll(|_, _, _| {}));
         assert_eq!(text(cache.objects(id, 1, &key_gen(40, 8)).unwrap()), "user");
     }
 
@@ -337,7 +374,7 @@ mod tests {
         );
         object_with(id, &mut cache, 1, "new", key_gen(40, 8));
         assert!(old_tx.send(BlockRender::Objects(Vec::new())).is_err());
-        assert!(cache.poll());
+        assert!(cache.poll(|_, _, _| {}));
         assert!(cache.objects(id, 1, &key_gen(40, 7)).is_none());
         assert_eq!(text(cache.objects(id, 1, &key_gen(40, 8)).unwrap()), "new");
     }
@@ -355,7 +392,7 @@ mod tests {
             move |_, _| rx.clone(),
         );
         assert!(cache.inflight());
-        cache.poll();
+        cache.poll(|_, _, _| {});
         assert!(cache.inflight());
     }
 }

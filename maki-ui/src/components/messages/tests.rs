@@ -2925,3 +2925,14 @@ fn selection_survives_a_resize() {
         "the reflow above the selection dragged the copy with it"
     );
 }
+
+#[test]
+fn failure_log_reports_each_key_once() {
+    let plugin: Arc<str> = Arc::from("renderer");
+    let mut log = FailureLog::default();
+    assert!(log.report(&plugin, 1, "boom"));
+    assert!(!log.report(&plugin, 1, "boom"));
+    assert!(log.report(&plugin, 2, "boom"));
+    assert!(log.report(&plugin, 1, "other"));
+    assert!(log.report(&Arc::from("other"), 1, "boom"));
+}

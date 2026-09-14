@@ -7,17 +7,25 @@
 //! caller keeps its own rendering. Registration order is load order, so
 //! the last plugin to register is outermost.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use maki_agent::SnapshotLine;
 use mlua::{Function, Lua, MultiValue, RegistryKey, Result as LuaResult, Table, Value};
 
+use crate::api::autocmd::dispatch;
 use crate::docs::{FnDoc, ParamDoc};
 
 use super::buf::parse_line;
 
 pub(crate) const RENDER_STORE_MISSING: &str = "renderer store not installed";
+
+/// Autocmd fired when a block renderer raises, carrying `{ plugin, message }`.
+/// The message stays out of the transcript and every model-facing surface.
+pub(crate) const RENDERER_ERROR_EVENT: &str = "RendererError";
+
+/// Attribution for a renderer failure no layer could be tied to.
+pub(crate) const UNKNOWN_PLUGIN: &str = "<unknown>";
 
 /// Bumped on every change to the renderer chain.
 static RENDERER_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -66,8 +74,13 @@ pub enum BlockRender {
     /// No layer claimed the block, so the caller's own renderer applies.
     Unhandled,
     Objects(Vec<RenderObject>),
-    /// A layer raised, so the caller keeps its previous frame.
-    Failed(String),
+    /// A layer raised, so the caller keeps its previous frame. `plugin` names
+    /// the innermost layer that raised, or [`UNKNOWN_PLUGIN`] when none could
+    /// be attributed.
+    Failed {
+        plugin: Arc<str>,
+        message: String,
+    },
 }
 
 struct Layer {
@@ -149,40 +162,95 @@ pub(crate) fn ctx_to_lua(lua: &Lua, ctx: &RenderCtx) -> LuaResult<Table> {
 }
 
 /// Walks the registered chain for one block. Runs on the Lua thread, so
-/// the caller must not hold a borrow of [`RendererStore`].
-pub(crate) fn render_block(lua: &Lua, block: Value, ctx: Table) -> BlockRender {
+/// the caller must not hold a borrow of [`RendererStore`]. A raise is
+/// attributed to its plugin, reported through the [`RENDERER_ERROR_EVENT`]
+/// autocmd, and returned to the caller, which keeps its previous frame.
+pub(crate) async fn render_block(lua: &Lua, block: Value, ctx: Table) -> BlockRender {
     let funcs = match lua.app_data_ref::<RendererStore>() {
         Some(store) if !store.layers.is_empty() => store
             .layers
             .iter()
-            .map(|layer| lua.registry_value::<Function>(&layer.key))
+            .map(|layer| {
+                lua.registry_value::<Function>(&layer.key)
+                    .map(|func| (Arc::clone(&layer.plugin), func))
+            })
             .collect::<LuaResult<Vec<_>>>(),
         _ => return BlockRender::Unhandled,
     };
-    let funcs = match funcs {
-        Ok(funcs) => Arc::new(funcs),
-        Err(error) => return BlockRender::Failed(error.to_string()),
+    let raised: Arc<Mutex<Option<Arc<str>>>> = Arc::default();
+    let render = match funcs {
+        Err(error) => failed(error.to_string()),
+        Ok(funcs) => {
+            let funcs = Arc::new(funcs);
+            let outermost = funcs.len() as isize - 1;
+            match chain(lua, funcs, outermost, Arc::clone(&raised))
+                .and_then(|renderer| renderer.call::<Value>((block, Value::Table(ctx))))
+            {
+                Ok(value) => parse_result(value),
+                Err(error) => BlockRender::Failed {
+                    plugin: raised
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone()
+                        .unwrap_or_else(|| Arc::from(UNKNOWN_PLUGIN)),
+                    message: error.to_string(),
+                },
+            }
+        }
     };
-    let outermost = funcs.len() as isize - 1;
-    let result = chain(lua, funcs, outermost)
-        .and_then(|renderer| renderer.call::<Value>((block, Value::Table(ctx))));
-    match result {
-        Ok(value) => parse_result(value),
-        Err(error) => BlockRender::Failed(error.to_string()),
+    if let BlockRender::Failed { plugin, message } = &render {
+        report_error(lua, plugin, message).await;
     }
+    render
+}
+
+/// Best-effort [`RENDERER_ERROR_EVENT`] notification. A failed dispatch must
+/// never turn into a second failure, so a missing table is simply skipped.
+async fn report_error(lua: &Lua, plugin: &Arc<str>, message: &str) {
+    if let Ok(data) = error_data(lua, plugin, message) {
+        dispatch(lua.clone(), RENDERER_ERROR_EVENT.to_owned(), None, data).await;
+    }
+}
+
+fn error_data(lua: &Lua, plugin: &Arc<str>, message: &str) -> LuaResult<Value> {
+    let table = lua.create_table()?;
+    table.set("plugin", plugin.as_ref())?;
+    table.set("message", message)?;
+    Ok(Value::Table(table))
 }
 
 /// Builds a Lua function that calls layer `idx` with a `prev` bound to
 /// the layer below it. `idx < 0` is the host default, which reports
-/// unhandled so the caller renders the block itself.
-fn chain(lua: &Lua, funcs: Arc<Vec<Function>>, idx: isize) -> LuaResult<Function> {
+/// unhandled so the caller renders the block itself. `raised` records the
+/// first layer whose call returned an error, so the innermost layer that
+/// actually raised wins over the wrappers the error propagates through.
+fn chain(
+    lua: &Lua,
+    funcs: Arc<Vec<(Arc<str>, Function)>>,
+    idx: isize,
+    raised: Arc<Mutex<Option<Arc<str>>>>,
+) -> LuaResult<Function> {
     if idx < 0 {
         return lua.create_function(|_, _: MultiValue| Ok(Value::Nil));
     }
     lua.create_function(move |lua, (block, ctx): (Value, Value)| {
-        let prev = chain(lua, Arc::clone(&funcs), idx - 1)?;
-        funcs[idx as usize].call::<Value>((prev, block, ctx))
+        let prev = chain(lua, Arc::clone(&funcs), idx - 1, Arc::clone(&raised))?;
+        let (plugin, func) = &funcs[idx as usize];
+        func.call::<Value>((prev, block, ctx)).inspect_err(|_| {
+            let mut raised = raised.lock().unwrap_or_else(PoisonError::into_inner);
+            if raised.is_none() {
+                *raised = Some(Arc::clone(plugin));
+            }
+        })
     })
+}
+
+/// A failure with no layer to attribute it to.
+pub(crate) fn failed(message: String) -> BlockRender {
+    BlockRender::Failed {
+        plugin: Arc::from(UNKNOWN_PLUGIN),
+        message,
+    }
 }
 
 fn parse_result(value: Value) -> BlockRender {
@@ -192,10 +260,10 @@ fn parse_result(value: Value) -> BlockRender {
             Ok(line) => BlockRender::Objects(vec![RenderObject::Lines(vec![SnapshotLine::plain(
                 line.to_owned(),
             )])]),
-            Err(error) => BlockRender::Failed(error.to_string()),
+            Err(error) => failed(error.to_string()),
         },
         Value::Table(table) => parse_objects(table),
-        other => BlockRender::Failed(format!(
+        other => failed(format!(
             "block renderer returned {}, expected a list of lines or {{raw = ...}}",
             other.type_name()
         )),
@@ -206,14 +274,14 @@ fn parse_objects(table: Table) -> BlockRender {
     if let Some(raw) = as_raw(&table) {
         return match raw {
             Ok(object) => BlockRender::Objects(vec![object]),
-            Err(error) => BlockRender::Failed(error.to_string()),
+            Err(error) => failed(error.to_string()),
         };
     }
     let mut out = Vec::with_capacity(table.raw_len());
     for idx in 1..=table.raw_len() {
         let item: Value = match table.raw_get(idx) {
             Ok(item) => item,
-            Err(error) => return BlockRender::Failed(error.to_string()),
+            Err(error) => return failed(error.to_string()),
         };
         let object = match &item {
             Value::String(_) => parse_line(&item).map(|line| RenderObject::Lines(vec![line])),
@@ -228,7 +296,7 @@ fn parse_objects(table: Table) -> BlockRender {
         };
         match object {
             Ok(object) => out.push(object),
-            Err(error) => return BlockRender::Failed(error.to_string()),
+            Err(error) => return failed(error.to_string()),
         }
     }
     BlockRender::Objects(out)
@@ -294,7 +362,14 @@ mod tests {
             theme_gen: 1,
         };
         let ctx = ctx_to_lua(lua, &ctx).expect("ctx");
-        render_block(lua, block, ctx)
+        smol::block_on(render_block(lua, block, ctx))
+    }
+
+    fn failure(result: BlockRender) -> (Arc<str>, String) {
+        match result {
+            BlockRender::Failed { plugin, message } => (plugin, message),
+            other => panic!("expected failure, got {other:?}"),
+        }
     }
 
     fn lines(objects: &[RenderObject]) -> Vec<String> {
@@ -456,13 +531,59 @@ mod tests {
     }
 
     #[test]
-    fn raising_layer_becomes_failed() {
+    fn raising_layer_becomes_failed_and_is_attributed() {
         let lua = lua_with_store();
         register(&lua, PLUGIN, "function(prev, block, ctx) error('boom') end");
-        assert!(matches!(
-            render(&lua, json!({"kind": "user"})),
-            BlockRender::Failed(message) if message.contains("boom")
-        ));
+        let (plugin, message) = failure(render(&lua, json!({"kind": "user"})));
+        assert_eq!(&*plugin, PLUGIN);
+        assert!(message.contains("boom"));
+    }
+
+    #[test]
+    fn inner_raise_is_attributed_over_the_wrapper() {
+        let lua = lua_with_store();
+        register(
+            &lua,
+            "inner",
+            "function(prev, block, ctx) error('inner boom') end",
+        );
+        register(
+            &lua,
+            "outer",
+            "function(prev, block, ctx) return prev(block, ctx) end",
+        );
+        let (plugin, message) = failure(render(&lua, json!({"kind": "user"})));
+        assert_eq!(&*plugin, "inner");
+        assert!(message.contains("inner boom"));
+    }
+
+    #[test]
+    fn outer_raise_is_attributed_to_the_outer_layer() {
+        let lua = lua_with_store();
+        register(
+            &lua,
+            "inner",
+            "function(prev, block, ctx) return { 'inner' } end",
+        );
+        register(
+            &lua,
+            "outer",
+            "function(prev, block, ctx) prev(block, ctx); error('outer boom') end",
+        );
+        let (plugin, message) = failure(render(&lua, json!({"kind": "user"})));
+        assert_eq!(&*plugin, "outer");
+        assert!(message.contains("outer boom"));
+    }
+
+    #[test]
+    fn error_data_carries_plugin_and_message() {
+        let lua = lua_with_store();
+        let data = error_data(&lua, &Arc::from(PLUGIN), "boom").expect("data");
+        let Value::Table(table) = data else {
+            panic!("expected a table");
+        };
+        assert_eq!(table.get::<String>("plugin").expect("plugin"), PLUGIN);
+        assert_eq!(table.get::<String>("message").expect("message"), "boom");
     }
 
     #[test_case("return { { { 'a', 'bold' }, { 'b' } }, 1 }" ; "integer_item")]
@@ -476,7 +597,7 @@ mod tests {
         );
         assert!(matches!(
             render(&lua, json!({"kind": "user"})),
-            BlockRender::Failed(_)
+            BlockRender::Failed { .. }
         ));
     }
 

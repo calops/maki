@@ -39,7 +39,9 @@ use crate::wrap;
 use maki_config::{ClockFormat, ToolOutputLines, UiConfig};
 use ratatui_image::picker::Picker;
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -64,6 +66,48 @@ const REFLOW_MARGIN_VIEWPORTS: u32 = 1;
 /// How far outside the drawn range an image keeps its encoded protocol.
 const IMAGE_KEEP_MARGIN_SEGMENTS: usize = 8;
 
+/// Identity of a renderer failure for the once-per-error log.
+#[derive(Hash, PartialEq, Eq)]
+struct FailureKey {
+    plugin: Arc<str>,
+    generation: u64,
+    fingerprint: u64,
+}
+
+/// Remembers renderer failures already reported, so the same error across
+/// many blocks warns once per `(plugin, generation, message)`. The text is
+/// hashed into the key and logged, never stored model-facing.
+#[derive(Default)]
+struct FailureLog {
+    seen: HashSet<FailureKey>,
+}
+
+impl FailureLog {
+    /// Reports `message` the first time this key is seen. Returns whether it
+    /// was newly reported.
+    fn report(&mut self, plugin: &Arc<str>, generation: u64, message: &str) -> bool {
+        let key = FailureKey {
+            plugin: Arc::clone(plugin),
+            generation,
+            fingerprint: fingerprint(message),
+        };
+        if !self.seen.insert(key) {
+            return false;
+        }
+        warn!(
+            plugin = &**plugin,
+            generation, message, "block renderer failed"
+        );
+        true
+    }
+}
+
+fn fingerprint(message: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    message.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Clone, Copy)]
 pub struct PromptProgress {
     pub processed: u32,
@@ -83,6 +127,9 @@ pub struct MessagesPanel {
     cache: SegmentCache,
     /// Renders of transcript blocks produced by Lua, applied in `tick`.
     block_render: BlockRenderCache,
+    /// Renderer failures already warned about, keyed by plugin, generation
+    /// and message hash.
+    renderer_errors: FailureLog,
     /// Raw sequences the last `view` laid out, in draw order. The final
     /// writer emits them after the frame.
     raw_placements: Vec<Placement>,
@@ -150,6 +197,7 @@ impl MessagesPanel {
             viewport_width: crossterm::terminal::size().map_or(80, |(w, _)| w.saturating_sub(1)),
             cache: SegmentCache::new(),
             block_render: BlockRenderCache::default(),
+            renderer_errors: FailureLog::default(),
             raw_placements: Vec::new(),
             render_mode: Arc::from("build"),
             tail: Vec::new(),
@@ -839,6 +887,7 @@ impl MessagesPanel {
             cache,
             block_render,
             lua_event_handle,
+            renderer_errors,
             ..
         } = self;
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
@@ -857,7 +906,9 @@ impl MessagesPanel {
                 });
             }
         }
-        let changed = block_render.poll();
+        let changed = block_render.poll(|plugin, generation, message| {
+            renderer_errors.report(plugin, generation, message);
+        });
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
             let id = BlockId::new(index as u64);
             let rendered = block_render

@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use maki_lua::RenderObject;
 
 use super::raw;
-use crate::components::{DisplayMessage, DisplayRole, lua_float::snapshot_to_line};
+use crate::components::{DisplayMessage, DisplayRole, ToolStatus, lua_float::snapshot_to_line};
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
 /// run of placeholder cells.
@@ -16,6 +16,13 @@ const MAX_RAW_HEIGHT: u16 = 128;
 /// Painted where a raw sequence lands. The final writer overwrites it with
 /// the sequence once the frame is drawn, so it must be a plain cell.
 const PLACEHOLDER_CELL: &str = " ";
+
+/// Lifecycle phases a projected block reports. They describe what Rust knows
+/// about the block, not how a renderer should draw it.
+const PHASE_COMPLETE: &str = "complete";
+const PHASE_IN_PROGRESS: &str = "in_progress";
+const PHASE_SUCCESS: &str = "success";
+const PHASE_ERROR: &str = "error";
 
 /// A raw sequence and where its rectangle starts inside the block's lines.
 pub(crate) struct RawSpan {
@@ -39,12 +46,26 @@ pub(crate) fn kind(role: &DisplayRole) -> &'static str {
 }
 
 /// Blocks the Lua renderer may own. Tool and thinking blocks keep their
-/// Rust rendering for now: clicks, collapsing and images hang off them.
+/// Rust rendering for now: clicks and collapsing hang off them. Images do
+/// not disqualify a block: `Segment::set_images` fills them in regardless of
+/// which side produced the lines.
 pub(crate) fn renderable(message: &DisplayMessage) -> bool {
     matches!(
         message.role,
         DisplayRole::User | DisplayRole::Assistant | DisplayRole::Error | DisplayRole::Done
-    ) && message.images.is_empty()
+    )
+}
+
+/// The block's lifecycle phase as Rust knows it, not a rendering hint.
+fn phase(role: &DisplayRole) -> &'static str {
+    match role {
+        DisplayRole::Tool(tool) => match tool.status {
+            ToolStatus::InProgress => PHASE_IN_PROGRESS,
+            ToolStatus::Success => PHASE_SUCCESS,
+            ToolStatus::Error => PHASE_ERROR,
+        },
+        _ => PHASE_COMPLETE,
+    }
 }
 
 /// Structured content plus metadata, never default-rendered lines.
@@ -52,6 +73,26 @@ pub(crate) fn project(message: &DisplayMessage) -> serde_json::Value {
     let mut block = serde_json::Map::new();
     block.insert("kind".into(), kind(&message.role).into());
     block.insert("text".into(), message.text.clone().into());
+    block.insert("phase".into(), phase(&message.role).into());
+    // Descriptors only: the encoded payload must never reach a renderer.
+    block.insert(
+        "images".into(),
+        message
+            .images
+            .iter()
+            .map(|image| {
+                serde_json::json!({
+                    "media_type": image.media_type.mime(),
+                    "bytes": image.data.len(),
+                })
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    block.insert(
+        "thinking_collapsed".into(),
+        message.thinking_collapsed.into(),
+    );
     for (key, value) in [
         ("annotation", &message.annotation),
         ("timestamp", &message.timestamp),
@@ -99,9 +140,13 @@ pub(crate) fn render(objects: &[RenderObject]) -> Option<(Vec<Line<'static>>, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::{IMAGE_PLACEHOLDER, ToolRole, ToolStatus};
     use maki_agent::SnapshotLine;
     use maki_providers::{ImageMediaType, ImageSource};
     use std::sync::Arc;
+    use test_case::test_case;
+
+    const PNG_PAYLOAD: &str = "base64-payload-that-must-not-leak";
 
     #[test]
     fn project_carries_kind_text_and_present_metadata() {
@@ -110,12 +155,43 @@ mod tests {
         let block = project(&message);
         assert_eq!(block["kind"], "user");
         assert_eq!(block["text"], "hi");
+        assert_eq!(block["phase"], PHASE_COMPLETE);
         assert_eq!(block["timestamp"], "12:00");
+        assert_eq!(block["thinking_collapsed"], false);
+        assert_eq!(block["images"], serde_json::json!([]));
         assert!(block.get("annotation").is_none());
     }
 
     #[test]
-    fn renderable_excludes_tools_thinking_and_images() {
+    fn project_lists_image_descriptors_without_the_payload() {
+        let mut message = DisplayMessage::new(DisplayRole::User, IMAGE_PLACEHOLDER.to_owned());
+        message.images = vec![ImageSource::new(
+            ImageMediaType::Png,
+            Arc::from(PNG_PAYLOAD),
+        )];
+        let block = project(&message);
+        let images = block["images"].as_array().expect("images array");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0]["media_type"], ImageMediaType::Png.mime());
+        assert_eq!(images[0]["bytes"], PNG_PAYLOAD.len());
+        assert!(!block.to_string().contains(PNG_PAYLOAD));
+    }
+
+    #[test_case(ToolStatus::InProgress => PHASE_IN_PROGRESS ; "in_progress")]
+    #[test_case(ToolStatus::Success => PHASE_SUCCESS ; "success")]
+    #[test_case(ToolStatus::Error => PHASE_ERROR ; "error")]
+    fn project_reports_tool_status_as_phase(status: ToolStatus) -> String {
+        let role = DisplayRole::Tool(Box::new(ToolRole {
+            id: "t1".to_owned(),
+            status,
+            name: Arc::from("bash"),
+        }));
+        let block = project(&DisplayMessage::new(role, String::new()));
+        block["phase"].as_str().expect("phase string").to_owned()
+    }
+
+    #[test]
+    fn renderable_excludes_tools_and_thinking() {
         assert!(renderable(&DisplayMessage::new(
             DisplayRole::Assistant,
             String::new()
@@ -124,9 +200,19 @@ mod tests {
             DisplayRole::Thinking,
             String::new()
         )));
-        let mut with_image = DisplayMessage::new(DisplayRole::User, String::new());
-        with_image.images = vec![ImageSource::new(ImageMediaType::Png, Arc::from("x"))];
-        assert!(!renderable(&with_image));
+    }
+
+    #[test]
+    fn image_bearing_user_block_is_renderable() {
+        let mut message = DisplayMessage::new(DisplayRole::User, IMAGE_PLACEHOLDER.to_owned());
+        message.images = vec![ImageSource::new(
+            ImageMediaType::Png,
+            Arc::from(PNG_PAYLOAD),
+        )];
+        assert!(renderable(&message));
+        let block = project(&message);
+        assert_eq!(block["images"].as_array().expect("images array").len(), 1);
+        assert!(!block.to_string().contains(PNG_PAYLOAD));
     }
 
     const SGR_RED: &str = "\u{1b}[31m";
