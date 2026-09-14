@@ -5270,6 +5270,34 @@ maki.ui.set_status_hint(nil)
 
 ---
 
+### `maki.ui.set_block_renderer()` {#maki-ui-set_block_renderer}
+
+```lua
+maki.ui.set_block_renderer({fn})
+```
+
+Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), or `{{raw = "...", width = n, height = n}}` for raw terminal sequences. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
+
+**Parameters:**
+
+- `{fn}` (`function|nil`) `function(prev, block, ctx) -> table`, or nil to unregister.
+
+**Example:**
+
+```lua
+maki.ui.set_block_renderer(function(prev, block, ctx)
+  if block.kind ~= "user" then
+    return prev(block, ctx)
+  end
+  return {
+    { "▌ ", "accent" },
+    { { block.text, { bold = true } } },
+  }
+end)
+```
+
+---
+
 ### `maki.ui.set_window_title()` {#maki-ui-set_window_title}
 
 ```lua

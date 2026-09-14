@@ -18,9 +18,11 @@ use crate::api::util::pair::{Pair, try_pair};
 use crate::docs::{FnDoc, ParamDoc};
 pub(crate) mod blit;
 pub(crate) mod buf;
+pub(crate) mod render;
 pub(crate) mod win;
 
 use crate::runtime::with_task_bufs;
+use render::set_block_renderer__doc;
 use win::WinHandle;
 
 pub(crate) struct HintStore {
@@ -509,7 +511,7 @@ lua_table! {
         buf, theme_color, highlight, markdown, humantime, terminal_size,
         display_width, truncate_text,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
-        manual set_window_title,
+        manual set_block_renderer, manual set_window_title,
     ]
 }
 
@@ -528,6 +530,14 @@ pub(crate) fn create_ui_table(
         open_editor__register(&t, lua, tx.clone())?;
         open_win__register(&t, lua, tx)?;
     }
+
+    let renderer_plugin = Arc::clone(&plugin);
+    t.set(
+        "set_block_renderer",
+        lua.create_function(move |lua, value: mlua::Value| {
+            render::set_block_renderer(lua, &renderer_plugin, value)
+        })?,
+    )?;
 
     let p = Arc::clone(&plugin);
     t.set(

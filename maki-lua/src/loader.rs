@@ -14,6 +14,7 @@ use maki_config::{GatedFile, PluginsConfig, ProjectConfig, RawConfig};
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction, UiAttachment};
+use crate::api::ui::render::{BlockRender, RenderCtx};
 use crate::error::PluginError;
 use crate::pack::DiscoveredPackage;
 use crate::plugin_permissions::{
@@ -948,6 +949,19 @@ impl PluginHost {
         self.inner.ui_action_rx.clone()
     }
 
+    /// Hands one transcript block to the renderer chain without waiting.
+    /// The caller polls the receiver, so a slow renderer never stalls the
+    /// UI thread and a stale answer is simply dropped.
+    pub fn request_render_block(
+        &self,
+        block: serde_json::Value,
+        ctx: RenderCtx,
+    ) -> flume::Receiver<BlockRender> {
+        let (reply, rx) = flume::bounded(1);
+        let _ = self.inner.tx.send(Request::RenderBlock { block, ctx, reply });
+        rx
+    }
+
     /// The bit every `maki.ui` and `maki.fn` roundtrip consults. The event
     /// loop attaches while it drains [`Self::ui_action_rx`] and detaches
     /// before teardown runs `SessionEnd`, since that receiver is a clone and
@@ -1004,6 +1018,19 @@ impl EventHandle {
             args,
             depth,
         });
+    }
+
+    /// Hands one transcript block to the renderer chain without waiting.
+    /// The caller polls the receiver, so a slow renderer never stalls the
+    /// UI thread and a stale answer is simply dropped.
+    pub fn request_render_block(
+        &self,
+        block: serde_json::Value,
+        ctx: RenderCtx,
+    ) -> flume::Receiver<BlockRender> {
+        let (reply, rx) = flume::bounded(1);
+        let _ = self.tx.send(Request::RenderBlock { block, ctx, reply });
+        rx
     }
 
     pub fn collect_prompt_slots(&self) -> ResolvedSlots {

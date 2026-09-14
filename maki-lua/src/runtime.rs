@@ -47,6 +47,7 @@ use crate::api::tool::{
 };
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
+use crate::api::ui::render::{self, BlockRender, RenderCtx, RendererStore};
 use crate::api::util::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};
 use crate::api::util::command::{
     LuaCommandReader, LuaCommandWriter, UiAction, UiAttachment, install_ui_attachment,
@@ -348,6 +349,13 @@ pub enum Request {
     },
     RunKeybindCallback {
         id: u64,
+    },
+    /// One transcript block, for the registered block renderer chain. Runs
+    /// inline on the Lua thread: the caller needs the answer before it paints.
+    RenderBlock {
+        block: Value,
+        ctx: RenderCtx,
+        reply: flume::Sender<BlockRender>,
     },
     Describe {
         plugin: Arc<str>,
@@ -2019,6 +2027,7 @@ impl LuaRuntime {
         lua.set_app_data(KeymapStore::new());
         lua.set_app_data(keymap_writer);
         lua.set_app_data(HintStore::new());
+        lua.set_app_data(RendererStore::default());
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
 
@@ -2544,6 +2553,7 @@ impl LuaRuntime {
                 writer.publish(entries);
             }
         }
+        render::clear_plugin(&self.lua, plugin);
         drop(revision_guard);
     }
 
@@ -3594,6 +3604,16 @@ pub fn spawn(
                         } => {
                             let res = rt.compute_permission_scopes(&plugin, &tool, input).await;
                             let _ = reply.send(res);
+                        }
+                        Request::RenderBlock { block, ctx, reply } => {
+                            let result = match json_to_lua(&rt.lua, &block) {
+                                Ok(block) => match render::ctx_to_lua(&rt.lua, &ctx) {
+                                    Ok(ctx) => render::render_block(&rt.lua, block, ctx),
+                                    Err(error) => BlockRender::Failed(error.to_string()),
+                                },
+                                Err(error) => BlockRender::Failed(error.to_string()),
+                            };
+                            let _ = reply.send(result);
                         }
                         Request::RunHook { run, reply } => {
                             // Spawned rather than awaited: a layer may park,
