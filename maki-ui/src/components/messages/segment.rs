@@ -672,6 +672,22 @@ mod tests {
     }
 
     #[test]
+    fn spinner_ticks_mutate_cached_lines_without_re_rendering() {
+        let mut seg = Segment::with_lines(vec![Line::raw("native")], Some(0));
+        seg.set_lua_render(
+            Some(vec![Line::from(Span::raw("before"))]),
+            Vec::new(),
+            vec![SpinnerLine::new(0, 0)],
+        );
+        let revision = seg.revision();
+        assert!(seg.render_key().is_none());
+        seg.update_spinners("after");
+        assert_eq!(seg.lines()[0].spans[0].content.as_ref(), "after");
+        assert_eq!(seg.revision(), revision);
+        assert!(seg.render_key().is_none());
+    }
+
+    #[test]
     fn lua_render_stands_in_for_rusted_lines_without_bumping_revision() {
         let mut seg = Segment::with_lines(vec![Line::raw("a"), Line::raw("b")], Some(0));
         assert_eq!(seg.lines().len(), 2);

@@ -260,9 +260,11 @@ fn transcript_tool(lua: &Lua) -> LuaResult<Table> {
 /// The span carries empty text and the semantic `{spinner = ...}` style, so it
 /// can sit anywhere a `{text, style}` span can and the host substitutes the
 /// glyph on every tick without a re-render. `style` names the theme style the
-/// glyph is drawn in; omit it for the theme's spinner style.
+/// glyph is drawn in; omit it for the theme's spinner style. The style must
+/// name an existing semantic theme style; frame, cadence, and motion settings
+/// remain host-owned.
 ///
-/// @param style string|nil Theme style name for the glyph, e.g. "tool_dim".
+/// @param style string|nil Existing semantic theme style name, e.g. "tool_dim".
 /// @return (table) A span `{ "", { spinner = style } }`.
 /// @example
 /// maki.ui.set_block_renderer(function(prev, block, ctx)
@@ -270,15 +272,36 @@ fn transcript_tool(lua: &Lua) -> LuaResult<Table> {
 /// end)
 #[lua_fn]
 fn spinner(lua: &Lua, style: Option<String>) -> LuaResult<Table> {
+    let style = style.unwrap_or_else(|| buf::SPINNER_STYLE_NAME.to_owned());
+    if !semantic_spinner_style(lua, &style) {
+        return Err(mlua::Error::runtime(format!(
+            "spinner style must name a registered semantic style, got {style}"
+        )));
+    }
     let span = lua.create_table_with_capacity(2, 0)?;
     span.raw_set(1, "")?;
     let style_table = lua.create_table_with_capacity(0, 1)?;
-    style_table.raw_set(
-        "spinner",
-        style.unwrap_or_else(|| buf::SPINNER_STYLE_NAME.to_owned()),
-    )?;
+    style_table.raw_set("spinner", style)?;
     span.raw_set(2, style_table)?;
     Ok(span)
+}
+
+fn semantic_spinner_style(lua: &Lua, style: &str) -> bool {
+    matches!(
+        style,
+        "spinner"
+            | "dim"
+            | "tool_dim"
+            | "tool"
+            | "tool_success"
+            | "tool_error"
+            | "error"
+            | "success"
+            | "warning"
+            | "accent"
+    ) || lua
+        .app_data_ref::<DecorationGroups>()
+        .is_some_and(|groups| groups.owns_style(style))
 }
 
 /// The host's native right-info builder, installed at UI startup.
@@ -1852,6 +1875,16 @@ mod tests {
         assert_eq!(span.raw_get::<String>(1).unwrap(), "");
         let style: Table = span.raw_get(2).unwrap();
         assert_eq!(style.raw_get::<String>("spinner").unwrap(), expected);
+    }
+
+    #[test]
+    fn spinner_rejects_unknown_style() {
+        let lua = ui_lua();
+        let err = lua
+            .load(r#"return ui.spinner("not_registered")"#)
+            .eval::<Table>()
+            .expect_err("unknown style");
+        assert!(err.to_string().contains("registered semantic style"));
     }
 
     #[test]

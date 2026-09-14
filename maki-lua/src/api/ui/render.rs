@@ -138,6 +138,10 @@ impl DecorationGroups {
         Ok(())
     }
 
+    pub(crate) fn owns_style(&self, style: &str) -> bool {
+        self.groups.contains_key(style)
+    }
+
     fn resolve(&mut self, plugin: &str, group: &str) -> Option<SpanStyle> {
         self.groups
             .get(group)

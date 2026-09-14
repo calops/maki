@@ -26,7 +26,11 @@ const SPINNER_ANIMATION: bool = true;
 /// The spinner glyph for a clock reading, or the static first frame when
 /// animation is off.
 pub fn spinner_glyph(elapsed_ms: u128) -> &'static str {
-    spinner_str(if SPINNER_ANIMATION { elapsed_ms } else { 0 })
+    spinner_glyph_with_animation(elapsed_ms, SPINNER_ANIMATION)
+}
+
+fn spinner_glyph_with_animation(elapsed_ms: u128, animate: bool) -> &'static str {
+    spinner_str(if animate { elapsed_ms } else { 0 })
 }
 
 /// Spinners need a consistent time reference. Using a static epoch avoids
@@ -180,6 +184,14 @@ impl std::fmt::Debug for Typewriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spinner_is_static_when_animation_is_disabled() {
+        assert_eq!(
+            spinner_glyph_with_animation(SPINNER_FRAME_MS, false),
+            spinner_glyph_with_animation(0, false)
+        );
+    }
 
     #[test]
     fn spinner_wraps_around() {

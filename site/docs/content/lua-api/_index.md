@@ -5068,11 +5068,13 @@ inside any line of spans, e.g. an in-progress tool's leading indicator.
 The span carries empty text and the semantic `{spinner = ...}` style, so it
 can sit anywhere a `{text, style}` span can and the host substitutes the
 glyph on every tick without a re-render. `style` names the theme style the
-glyph is drawn in; omit it for the theme's spinner style.
+glyph is drawn in; omit it for the theme's spinner style. The style must
+name an existing semantic theme style; frame, cadence, and motion settings
+remain host-owned.
 
 **Parameters:**
 
-- `{style?}` (`string|nil`) Theme style name for the glyph, e.g. "tool_dim".
+- `{style?}` (`string|nil`) Existing semantic theme style name, e.g. "tool_dim".
 
 **Returns:** (`table`) A span `{ "", { spinner = style } }`.
 
