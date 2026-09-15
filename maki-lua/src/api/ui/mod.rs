@@ -304,6 +304,32 @@ fn semantic_spinner_style(lua: &Lua, style: &str) -> bool {
         .is_some_and(|groups| groups.owns_style(style))
 }
 
+/// Returns the host-owned marker span for a todo status. The token controls
+/// glyph and semantic style, so Lua never depends on the marker characters.
+///
+/// @param status string `pending`, `in_progress`, `completed`, or `cancelled`.
+/// @return (table) A styled marker span.
+/// @example
+/// local marker = maki.ui.todo_marker("in_progress")
+#[lua_fn]
+fn todo_marker(lua: &Lua, status: String) -> LuaResult<Table> {
+    let (text, group) = match status.as_str() {
+        "pending" => ("[ ]", "todo.pending"),
+        "in_progress" => ("[•]", "todo.in_progress"),
+        "completed" => ("[✓]", "todo.completed"),
+        "cancelled" => ("[x]", "todo.cancelled"),
+        _ => {
+            return Err(mlua::Error::runtime(
+                "todo marker status must be pending, in_progress, completed, or cancelled",
+            ));
+        }
+    };
+    let span = lua.create_table_with_capacity(2, 0)?;
+    span.raw_set(1, text)?;
+    span.raw_set(2, group)?;
+    Ok(span)
+}
+
 /// The host's native right-info builder, installed at UI startup.
 pub type RightInfoFn = fn(usize, Option<&str>, Option<&str>, u16) -> Vec<SnapshotSpan>;
 
@@ -887,7 +913,7 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_tool, spinner, right_info,
+        buf, theme_color, theme_style, transcript_markdown, transcript_tool, spinner, todo_marker, right_info,
         highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,
@@ -1875,6 +1901,29 @@ mod tests {
         assert_eq!(span.raw_get::<String>(1).unwrap(), "");
         let style: Table = span.raw_get(2).unwrap();
         assert_eq!(style.raw_get::<String>("spinner").unwrap(), expected);
+    }
+
+    #[test_case("pending", "[ ]", "todo.pending" ; "pending")]
+    #[test_case("in_progress", "[•]", "todo.in_progress" ; "in_progress")]
+    #[test_case("completed", "[✓]", "todo.completed" ; "completed")]
+    #[test_case("cancelled", "[x]", "todo.cancelled" ; "cancelled")]
+    fn todo_marker_uses_host_semantics(status: &str, text: &str, group: &str) {
+        let lua = ui_lua();
+        let span: Table = lua
+            .load(format!(r#"return ui.todo_marker("{status}")"#))
+            .eval()
+            .expect("marker");
+        assert_eq!(span.raw_get::<String>(1).expect("text"), text);
+        assert_eq!(span.raw_get::<String>(2).expect("group"), group);
+    }
+
+    #[test]
+    fn todo_marker_rejects_unknown_status() {
+        let err = ui_lua()
+            .load(r#"return ui.todo_marker("unknown")"#)
+            .eval::<Table>()
+            .expect_err("invalid status");
+        assert!(err.to_string().contains("todo marker status"));
     }
 
     #[test]

@@ -419,12 +419,19 @@ pub(crate) const STYLE_NAMES: &[&str] = &[
     "keybind_section",
     "success",
     "todo_completed",
+    "todo.completed",
     "warning",
     "todo_in_progress",
+    "todo.in_progress",
     "todo_pending",
+    "todo.pending",
     "pending",
     "todo_cancelled",
-    "cancelled",
+    "todo.cancelled",
+    "todo.priority.high",
+    "todo.priority.medium",
+    "todo.priority.low",
+    "todo.empty",
 ];
 
 fn named_style(t: &Theme, name: &str) -> Option<Style> {
@@ -474,10 +481,13 @@ fn named_style(t: &Theme, name: &str) -> Option<Style> {
         "keybind_key" => t.keybind_key,
         "keybind_desc" => t.keybind_desc,
         "keybind_section" => t.keybind_section,
-        "success" | "todo_completed" => t.todo_completed,
-        "warning" | "todo_in_progress" => t.todo_in_progress,
-        "todo_pending" | "pending" => t.todo_pending,
-        "todo_cancelled" | "cancelled" => t.todo_cancelled,
+        "success" | "todo_completed" | "todo.completed" => t.todo_completed,
+        "warning" | "todo_in_progress" | "todo.in_progress" => t.todo_in_progress,
+        "todo_pending" | "pending" | "todo.pending" => t.todo_pending,
+        "todo_cancelled" | "cancelled" | "todo.cancelled" => t.todo_cancelled,
+        "todo.priority.high" => t.todo_in_progress,
+        "todo.priority.medium" => t.todo_pending,
+        "todo.priority.low" | "todo.empty" => t.tool_dim,
         _ => return None,
     })
 }

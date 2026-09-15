@@ -5088,6 +5088,29 @@ end)
 
 ---
 
+### `maki.ui.todo_marker()` {#maki-ui-todo_marker}
+
+```lua
+maki.ui.todo_marker({status})
+```
+
+Returns the host-owned marker span for a todo status. The token controls
+glyph and semantic style, so Lua never depends on the marker characters.
+
+**Parameters:**
+
+- `{status}` (`string`) `pending`, `in_progress`, `completed`, or `cancelled`.
+
+**Returns:** (`table`) A styled marker span.
+
+**Example:**
+
+```lua
+local marker = maki.ui.todo_marker("in_progress")
+```
+
+---
+
 ### `maki.ui.right_info()` {#maki-ui-right_info}
 
 ```lua

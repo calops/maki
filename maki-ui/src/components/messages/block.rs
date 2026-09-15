@@ -208,10 +208,19 @@ fn tool_body_projection(
         ToolOutput::Batch { text } => ("batch", text.as_str(), true),
         ToolOutput::TodoList(items) => {
             let total_lines = items.len();
+            let visible_lines = if expanded || limit == 0 {
+                total_lines
+            } else {
+                total_lines.min(limit)
+            };
             return Some(serde_json::json!({
                 "kind": "todo_list",
-                "items": items,
-                "display": body_display(total_lines, total_lines, limit, expanded),
+                "items": items.iter().map(todo_item_projection).collect::<Vec<_>>(),
+                "empty": items.is_empty().then(|| serde_json::json!({
+                    "label": "No todos.",
+                    "group": "todo.empty",
+                })),
+                "display": body_display(total_lines, visible_lines, limit, expanded),
             }));
         }
         _ => return None,
@@ -228,6 +237,15 @@ fn tool_body_projection(
         "legacy": legacy.then_some(true),
         "display": body_display(total_lines, visible_lines, limit, expanded),
     }))
+}
+
+fn todo_item_projection(item: &maki_agent::types::TodoItem) -> serde_json::Value {
+    serde_json::json!({
+        "content": item.content,
+        "status": item.status,
+        "priority": item.priority,
+        "marker": item.status,
+    })
 }
 
 fn logical_line_count(text: &str) -> usize {
@@ -702,6 +720,27 @@ mod tests {
         assert_eq!(images[0]["media_type"], ImageMediaType::Png.mime());
         assert_eq!(images[0]["bytes"], PNG_PAYLOAD.len());
         assert!(!block.to_string().contains(PNG_PAYLOAD));
+    }
+
+    #[test]
+    fn todo_body_projection_uses_semantic_tokens() {
+        let output = ToolOutput::TodoList(vec![maki_agent::types::TodoItem {
+            content: "write tests".to_owned(),
+            status: maki_agent::types::TodoStatus::Completed,
+            priority: maki_agent::types::TodoPriority::High,
+        }]);
+        let body = tool_body_projection(&output, 0, true).expect("body");
+        assert_eq!(body["items"][0]["status"], "completed");
+        assert_eq!(body["items"][0]["marker"], "completed");
+        assert_eq!(body["items"][0]["priority"], "high");
+        assert!(body["items"][0].get("glyph").is_none());
+    }
+
+    #[test]
+    fn todo_body_projection_has_semantic_empty_state() {
+        let body = tool_body_projection(&ToolOutput::TodoList(Vec::new()), 0, true).expect("body");
+        assert_eq!(body["empty"]["label"], "No todos.");
+        assert_eq!(body["empty"]["group"], "todo.empty");
     }
 
     #[test]

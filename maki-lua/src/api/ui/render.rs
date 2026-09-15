@@ -450,6 +450,14 @@ fn builtin_group_style(group: &str) -> Option<SpanStyle> {
         "diff.old_line_nr" => "diff_old_line_nr",
         "diff.new_line_nr" => "diff_new_line_nr",
         "grep.match" => "match",
+        "todo.pending"
+        | "todo.in_progress"
+        | "todo.completed"
+        | "todo.cancelled"
+        | "todo.priority.high"
+        | "todo.priority.medium"
+        | "todo.priority.low"
+        | "todo.empty" => group,
         _ => return None,
     };
     Some(SpanStyle::Named(name.to_owned()))
