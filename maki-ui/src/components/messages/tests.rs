@@ -13,12 +13,14 @@ use maki_providers::ImageMediaType;
 use ratatui::backend::TestBackend;
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use test_case::test_case;
 
 const UNDECODABLE_IMAGE: &str = "invalid image";
 const VIEW_WIDTH: u16 = 80;
 const VIEW_HEIGHT: u16 = 24;
+static THEME_LOCK: Mutex<()> = Mutex::new(());
 
 #[test_case(false ; "live")]
 #[test_case(true ; "loaded")]
@@ -3211,6 +3213,91 @@ fn lua_static_text_body_matches_native(output: ToolOutput) {
             );
         }
     }
+}
+
+#[test_case("" ; "empty")]
+#[test_case("a plain paragraph long enough that a narrow width wraps it onto multiple lines" ; "paragraph")]
+#[test_case("# Heading\n\n- **bold** item\n  - nested\n\n1. ordered\n2. ordered two" ; "headings_and_lists")]
+#[test_case("> quote with *emphasis* and `code`\n\n```rust\nfn café() {}\n```" ; "quote_and_code")]
+fn lua_static_markdown_body_matches_native(text: &str) {
+    let _theme_lock = THEME_LOCK.lock().expect("theme lock");
+    const CUSTOM_THEME: &str = r##"
+[ui.assistant]
+fg = "#00ff00"
+modifiers = ["italic"]
+
+[ui.heading]
+fg = "#ff00ff"
+"##;
+    for theme in [
+        theme::load_by_name("dracula").expect("dracula theme"),
+        theme::Theme::from_toml(CUSTOM_THEME).expect("custom theme"),
+    ] {
+        theme::set(theme);
+        for status in [
+            ToolStatus::InProgress,
+            ToolStatus::Success,
+            ToolStatus::Error,
+        ] {
+            for width in [24, 80, 200] {
+                let mut message =
+                    tool_message_with(status, Some("Markdown"), Some("1.2k"), Some("12:00"));
+                message.tool_output = Some(Arc::new(ToolOutput::Markdown(text.into())));
+                let output_lines = maki_config::ToolOutputLines::default();
+                let rctx = crate::components::tool_display::RenderCtx {
+                    started_at: Instant::now(),
+                    width,
+                    tool_output_lines: &output_lines,
+                };
+                let native = MessagesPanel::build_tool_segment_lines(
+                    &message,
+                    status,
+                    &rctx,
+                    SectionFlags {
+                        script: false,
+                        output: true,
+                    },
+                );
+                let objects = block_objects(&message, width, None);
+                let rendered = block::render(&objects).expect("static Lua body");
+                assert!(rendered.tool.is_none());
+                assert_eq!(
+                    composed(rendered),
+                    with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+                    "status={status:?} width={width} text={text:?}"
+                );
+                assert!(matches!(
+                    message.tool_output.as_deref(),
+                    Some(ToolOutput::Markdown(output)) if output.text == text
+                ));
+            }
+        }
+    }
+}
+
+#[test_case(usize::MAX, false ; "collapsed")]
+#[test_case(1, false ; "truncated")]
+fn lua_tool_uses_native_marker_for_non_static_markdown_body(limit: usize, expanded: bool) {
+    let mut message = tool_message();
+    message.tool_output = Some(Arc::new(ToolOutput::Markdown("one\ntwo".into())));
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+    let reply = host.event_handle().request_render_block(
+        block::project_with_tool_display(&message, limit, expanded),
+        RenderCtx {
+            width: 80,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
+    else {
+        panic!("objects");
+    };
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    );
 }
 
 #[test]

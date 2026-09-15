@@ -103,7 +103,7 @@ end
 -- The tool header plus the host's body, with the indicator, prefix, header
 -- text (or snapshot spans), annotation and right-info drawn natively. Returns
 -- nil when the block carries no structured header, so the caller falls back.
-local function tool_body(body)
+local function tool_body(body, ctx)
   if not body then
     return nil
   end
@@ -125,6 +125,26 @@ local function tool_body(body)
         { " (" .. item.priority .. ")", "todo.priority." .. item.priority },
       }
       lines[#lines + 1] = spans
+    end
+    return lines
+  end
+  if body.kind == "markdown" then
+    if body.text == "" then
+      return {}
+    end
+    local style = maki.ui.theme_style("assistant")
+    if not style then
+      return nil
+    end
+    local lines = maki.ui.transcript_markdown(body.text, ctx.width - 2, {
+      text_style = style,
+      prefix_style = style,
+    })
+    if not lines then
+      return nil
+    end
+    for _, line in ipairs(lines) do
+      table.insert(line, 1, { "  ", {} })
     end
     return lines
   end
@@ -170,7 +190,7 @@ local function tool_lines(block, ctx)
   if tool.timestamp then
     maki.ui.right_info(spans, tool.usage, tool.timestamp, ctx.width)
   end
-  local body = tool_body(tool.body)
+  local body = tool_body(tool.body, ctx)
   if not body then
     return { spans, maki.ui.transcript_tool() }
   end
