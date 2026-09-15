@@ -3242,10 +3242,65 @@ fn lua_tool_uses_native_marker_for_collapsed_plain_body() {
 }
 
 #[test]
-fn lua_tool_uses_native_marker_for_todo_body() {
+fn native_todo_body_has_semantic_items() {
+    let mut message = tool_message();
+    message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![
+        maki_agent::types::TodoItem {
+            content: "café".to_owned(),
+            status: maki_agent::types::TodoStatus::Completed,
+            priority: maki_agent::types::TodoPriority::High,
+        },
+        maki_agent::types::TodoItem {
+            content: "cancelled".to_owned(),
+            status: maki_agent::types::TodoStatus::Cancelled,
+            priority: maki_agent::types::TodoPriority::Low,
+        },
+    ])));
+    let native = native_tool_lines(&message, ToolStatus::Success, 24);
+    assert_eq!(native.lines.len(), 3);
+    assert_eq!(native.lines[1].spans[1].content.as_ref(), "[✓]");
+    assert_eq!(native.lines[1].spans[2].content.as_ref(), " ");
+    assert_eq!(native.lines[1].spans[3].content.as_ref(), "café");
+    assert_eq!(native.lines[1].spans[4].content.as_ref(), " (high)");
+    assert_eq!(
+        native.lines[2].spans[1].style,
+        theme::style_by_name("todo.cancelled")
+    );
+}
+
+#[test]
+fn native_empty_todo_body_uses_semantic_empty_style() {
+    let mut message = tool_message();
+    message.tool_output = Some(Arc::new(ToolOutput::TodoList(Vec::new())));
+    let native = native_tool_lines(&message, ToolStatus::Success, 80);
+    assert_eq!(native.lines[1].spans[1].content.as_ref(), "No todos.");
+    assert_eq!(
+        native.lines[1].spans[1].style,
+        theme::style_by_name("todo.empty")
+    );
+}
+
+#[test]
+fn lua_tool_uses_native_marker_for_truncated_todo_body() {
     let mut message = tool_message();
     message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![])));
-    let objects = block_objects(&message, 80, None);
+    let objects = {
+        const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+        let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+        let reply = host.event_handle().request_render_block(
+            block::project_with_tool_display(&message, 1, false),
+            RenderCtx {
+                width: 80,
+                mode: Arc::from("build"),
+                theme_gen: theme::generation(),
+            },
+        );
+        let BlockRender::Objects(objects) = reply.recv_timeout(REPLY_TIMEOUT).expect("reply")
+        else {
+            panic!("objects");
+        };
+        objects
+    };
     assert!(
         objects
             .iter()

@@ -545,14 +545,18 @@ impl ToolLineBuilder {
             true
         };
         if show_output {
-            let resolved = resolve_output(
-                msg.tool_output.as_deref(),
-                body,
-                msg.live_output.as_deref(),
-                msg.truncated_lines,
-                self.limits,
-            );
-            self.push_resolved_output(&resolved);
+            if let Some(ToolOutput::TodoList(items)) = msg.tool_output.as_deref() {
+                self.push_todo_body(items);
+            } else {
+                let resolved = resolve_output(
+                    msg.tool_output.as_deref(),
+                    body,
+                    msg.live_output.as_deref(),
+                    msg.truncated_lines,
+                    self.limits,
+                );
+                self.push_resolved_output(&resolved);
+            }
         }
     }
 
@@ -566,6 +570,45 @@ impl ToolLineBuilder {
             self.lines.push(line);
         }
         self.content_range = (start, self.lines.len());
+    }
+
+    fn push_todo_body(&mut self, items: &[maki_agent::types::TodoItem]) {
+        if items.is_empty() {
+            self.lines.push(Line::from(vec![
+                Span::raw(TOOL_BODY_INDENT),
+                Span::styled("No todos.", theme::style_by_name("todo.empty")),
+            ]));
+            return;
+        }
+        for item in items {
+            let status = match item.status {
+                maki_agent::types::TodoStatus::Pending => "pending",
+                maki_agent::types::TodoStatus::InProgress => "in_progress",
+                maki_agent::types::TodoStatus::Completed => "completed",
+                maki_agent::types::TodoStatus::Cancelled => "cancelled",
+            };
+            let priority = match item.priority {
+                maki_agent::types::TodoPriority::High => "high",
+                maki_agent::types::TodoPriority::Medium => "medium",
+                maki_agent::types::TodoPriority::Low => "low",
+            };
+            self.lines.push(Line::from(vec![
+                Span::raw(TOOL_BODY_INDENT),
+                Span::styled(
+                    item.status.marker().to_owned(),
+                    theme::style_by_name(&format!("todo.{status}")),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    item.content.clone(),
+                    theme::style_by_name(&format!("todo.{status}")),
+                ),
+                Span::styled(
+                    format!(" ({priority})"),
+                    theme::style_by_name(&format!("todo.priority.{priority}")),
+                ),
+            ]));
+        }
     }
 
     fn push_resolved_output(&mut self, resolved: &ResolvedOutput<'_>) {
