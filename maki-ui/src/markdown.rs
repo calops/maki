@@ -341,6 +341,31 @@ struct TranscriptDiffSources {
     after: String,
 }
 
+#[derive(Deserialize)]
+struct TranscriptGrep {
+    entries: Vec<TranscriptGrepEntry>,
+}
+
+#[derive(Deserialize)]
+struct TranscriptGrepEntry {
+    path: String,
+    groups: Vec<TranscriptGrepGroup>,
+}
+
+#[derive(Deserialize)]
+struct TranscriptGrepGroup {
+    lines: Vec<TranscriptGrepLine>,
+}
+
+/// The projection's public line shape. Match ranges stay out: the host colours
+/// match lines from syntax and never paints ranges.
+#[derive(Deserialize)]
+struct TranscriptGrepLine {
+    line: usize,
+    text: String,
+    is_match: bool,
+}
+
 /// Temporary parity bridge for diff bodies: structural lines whose syntax and
 /// change spans are baked from the host's own renderer. Diff syntax needs the
 /// whole file on each side, because a line's parse state depends on the lines
@@ -368,12 +393,56 @@ pub(crate) fn transcript_diff(diff: serde_json::Value, _width: u16) -> Vec<Snaps
     .collect()
 }
 
+/// Temporary parity bridge for settled grep bodies. Source match ranges remain
+/// structured data for a future Lua or Tree-sitter renderer; this bridge uses
+/// the native syntax and context-line treatment unchanged.
+pub(crate) fn transcript_grep(grep: serde_json::Value, _width: u16) -> Vec<SnapshotLine> {
+    let Ok(grep) = serde_json::from_value::<TranscriptGrep>(grep) else {
+        return Vec::new();
+    };
+    let entries = grep
+        .entries
+        .into_iter()
+        .map(|entry| maki_agent::GrepFileEntry {
+            path: entry.path,
+            groups: entry
+                .groups
+                .into_iter()
+                .map(|group| maki_agent::GrepMatchGroup {
+                    lines: group
+                        .lines
+                        .into_iter()
+                        .map(|line| maki_agent::GrepLine {
+                            line_nr: line.line,
+                            text: line.text,
+                            is_match: line.is_match,
+                            match_ranges: Vec::new(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    crate::components::code_view::transcript_grep_content(
+        &ToolOutput::GrepResult { entries },
+        crate::components::code_view::RenderLimits {
+            script: usize::MAX,
+            output: usize::MAX,
+        },
+    )
+    .lines
+    .iter()
+    .map(snapshot_line)
+    .collect()
+}
+
 /// Installs the host bridges behind the Lua render primitives. A once-off at
 /// UI startup; headless hosts leave the slots unset.
 pub(crate) fn install_render_bridges() {
     maki_lua::set_transcript_markdown(transcript_markdown);
     maki_lua::set_transcript_code(transcript_code);
     maki_lua::set_transcript_diff(transcript_diff);
+    maki_lua::set_transcript_grep(transcript_grep);
     maki_lua::set_right_info(crate::components::tool_display::right_info_spans);
 }
 

@@ -171,10 +171,12 @@ fn theme_style(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
 pub type TranscriptMarkdownFn = fn(&str, u16, &str, &SpanStyle, &SpanStyle) -> Vec<SnapshotLine>;
 pub type TranscriptCodeFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 pub type TranscriptDiffFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
+pub type TranscriptGrepFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 
 static TRANSCRIPT_MARKDOWN: OnceLock<TranscriptMarkdownFn> = OnceLock::new();
 static TRANSCRIPT_CODE: OnceLock<TranscriptCodeFn> = OnceLock::new();
 static TRANSCRIPT_DIFF: OnceLock<TranscriptDiffFn> = OnceLock::new();
+static TRANSCRIPT_GREP: OnceLock<TranscriptGrepFn> = OnceLock::new();
 
 /// Installs the renderer behind `maki.ui.transcript_markdown`. Headless hosts
 /// leave it unset, and the primitive then answers nil.
@@ -283,6 +285,34 @@ fn transcript_diff(lua: &Lua, diff: Value, width: Value) -> LuaResult<Value> {
         return Ok(Value::Nil);
     };
     let lines = render(diff, width);
+    let out = lua.create_table_with_capacity(lines.len(), 0)?;
+    for (i, line) in lines.iter().enumerate() {
+        out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
+    }
+    Ok(Value::Table(out))
+}
+
+/// Installs the temporary exact-parity grep renderer. It is removed once Lua
+/// code-view primitives cover gutters, syntax, dimmed context, and truncation.
+pub fn set_transcript_grep(renderer: TranscriptGrepFn) {
+    let _ = TRANSCRIPT_GREP.set(renderer);
+}
+
+/// Renders structured grep data exactly as the transcript, as a temporary
+/// parity bridge. Temporary: removed after Lua grep-view primitives reach
+/// parity, and separate from the semantic-decoration target.
+///
+/// @param grep table Structured `block.tool.grep` source data.
+/// @param width integer Wrap width in display cells, > 0.
+/// @return (table|nil) Lines, or nil when unavailable.
+#[lua_fn]
+fn transcript_grep(lua: &Lua, grep: Value, width: Value) -> LuaResult<Value> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let grep = lua.from_value(grep)?;
+    let Some(render) = TRANSCRIPT_GREP.get() else {
+        return Ok(Value::Nil);
+    };
+    let lines = render(grep, width);
     let out = lua.create_table_with_capacity(lines.len(), 0)?;
     for (i, line) in lines.iter().enumerate() {
         out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
@@ -930,7 +960,7 @@ fn open_win(
 pub(crate) const register_decoration_group__doc: FnDoc = FnDoc {
     name: "register_decoration_group",
     args: "{name}, {style}",
-    desc: "Registers a plugin-owned semantic decoration group. The returned decoration group is namespaced as `plugin.<plugin>.<name>` and may be used in a Lines decoration. Built-in groups are `syntax.keyword`, `diff.old`, `diff.new`, `diff.old_sign`, `diff.new_sign`, `diff.line_nr`, `diff.old_line_nr`, `diff.new_line_nr`, and `grep.match`.",
+    desc: "Registers a plugin-owned semantic decoration group. The returned decoration group is namespaced as `plugin.<plugin>.<name>` and may be used in a Lines decoration. Built-in groups are `syntax.keyword`, `diff.old`, `diff.new`, `diff.old_sign`, `diff.new_sign`, `diff.line_nr`, `diff.old_line_nr`, `diff.new_line_nr`, `grep.match`, and `grep.empty`.",
     params: &[
         ParamDoc {
             name: "{name}",
@@ -974,7 +1004,7 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_tool, spinner, todo_marker, right_info,
+        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_grep, transcript_tool, spinner, todo_marker, right_info,
         highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,

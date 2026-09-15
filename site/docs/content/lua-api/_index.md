@@ -5063,6 +5063,25 @@ and separate from the semantic-decoration target.
 
 ---
 
+### `maki.ui.transcript_grep()` {#maki-ui-transcript_grep}
+
+```lua
+maki.ui.transcript_grep({grep}, {width})
+```
+
+Renders structured grep data exactly as the transcript, as a temporary
+parity bridge. Temporary: removed after Lua grep-view primitives reach
+parity, and separate from the semantic-decoration target.
+
+**Parameters:**
+
+- `{grep}` (`table`) Structured `block.tool.grep` source data.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
+
+**Returns:** (`table|nil`) Lines, or nil when unavailable.
+
+---
+
 ### `maki.ui.transcript_tool()` {#maki-ui-transcript_tool}
 
 ```lua
@@ -5613,7 +5632,7 @@ maki.ui.set_status_hint(nil)
 maki.ui.register_decoration_group({name}, {style})
 ```
 
-Registers a plugin-owned semantic decoration group. The returned decoration group is namespaced as `plugin.<plugin>.<name>` and may be used in a Lines decoration. Built-in groups are `syntax.keyword`, `diff.old`, `diff.new`, `diff.old_sign`, `diff.new_sign`, `diff.line_nr`, `diff.old_line_nr`, `diff.new_line_nr`, and `grep.match`.
+Registers a plugin-owned semantic decoration group. The returned decoration group is namespaced as `plugin.<plugin>.<name>` and may be used in a Lines decoration. Built-in groups are `syntax.keyword`, `diff.old`, `diff.new`, `diff.old_sign`, `diff.new_sign`, `diff.line_nr`, `diff.old_line_nr`, `diff.new_line_nr`, `grep.match`, and `grep.empty`.
 
 **Parameters:**
 

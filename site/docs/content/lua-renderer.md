@@ -93,3 +93,7 @@ block.tool.grep = {
 ```
 
 `line` is 1-based. `ranges` are validated half-open UTF-8 byte columns into `text`. `is_match` preserves grep's source match-event meaning. It can be true when a multiline match has no range in this displayed line, so it is not derived from `ranges`.
+
+`grep.display` mirrors the established body display shape. `visible_lines` and `total_lines` count the rows the transcript would draw, including file headers and group separators, and `truncation.hidden_matches` is the match count the row budget dropped. Native grep truncates, so a renderer only owns the body when the tool is expanded and `truncation` is nil. An empty result provides `empty = { label = "No files found", group = "grep.empty" }`.
+
+`ranges` are kept for a future Lua renderer. The current host renderer colours match lines from syntax alone and does not emphasise the ranges, so a parity bridge must not paint them either.

@@ -208,7 +208,10 @@ fn tool_block(
                 tool.insert("diff".into(), diff_projection(path, before, after, summary));
             }
             ToolOutput::GrepResult { entries } => {
-                tool.insert("grep".into(), grep_projection(entries));
+                tool.insert(
+                    "grep".into(),
+                    grep_projection(entries, output_limit, expanded.output),
+                );
             }
             _ => {}
         }
@@ -504,7 +507,24 @@ fn valid_match_ranges(line: &maki_agent::GrepLine) -> Option<&[std::ops::Range<u
     valid.then_some(&line.match_ranges)
 }
 
-fn grep_projection(entries: &[maki_agent::GrepFileEntry]) -> serde_json::Value {
+fn grep_projection(
+    entries: &[maki_agent::GrepFileEntry],
+    limit: usize,
+    expanded: bool,
+) -> serde_json::Value {
+    let effective = if expanded { usize::MAX } else { limit };
+    let plan = crate::components::code_view::plan_grep_layout(entries, effective);
+    let truncation = plan.truncated.then(|| {
+        serde_json::json!({
+            "hidden_matches": plan.hidden_matches,
+        })
+    });
+    let empty = entries.is_empty().then(|| {
+        serde_json::json!({
+            "label": maki_agent::NO_FILES_FOUND,
+            "group": "grep.empty",
+        })
+    });
     serde_json::json!({
         "entries": entries.iter().map(|entry| serde_json::json!({
             "path": entry.path,
@@ -521,6 +541,16 @@ fn grep_projection(entries: &[maki_agent::GrepFileEntry]) -> serde_json::Value {
                 })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
+        "display": {
+            "expanded": expanded,
+            "limit": {
+                "configured": limit,
+                "visible_lines": plan.rows.len(),
+                "total_lines": plan.total_rows,
+            },
+            "truncation": truncation,
+        },
+        "empty": empty,
     })
 }
 
@@ -987,19 +1017,60 @@ mod tests {
         assert!(projection.get("display").is_none());
     }
 
+    /// Grep truncation is real budget accounting, so the projection reads the
+    /// same plan the renderer paints.
     #[test]
-    fn grep_projection_preserves_source_match_ranges() {
-        let projection = grep_projection(&[maki_agent::GrepFileEntry {
+    fn grep_projection_reports_the_native_budget() {
+        let entries = vec![maki_agent::GrepFileEntry {
             path: "src/lib.rs".to_owned(),
             groups: vec![maki_agent::GrepMatchGroup {
-                lines: vec![maki_agent::GrepLine {
-                    line_nr: 2,
-                    text: "héllo".to_owned(),
-                    is_match: true,
-                    match_ranges: std::iter::once(1..3).collect(),
+                lines: (1..=4)
+                    .map(|line_nr| maki_agent::GrepLine {
+                        line_nr,
+                        text: format!("line {line_nr}"),
+                        is_match: true,
+                        match_ranges: Vec::new(),
+                    })
+                    .collect(),
+            }],
+        }];
+        let expanded = grep_projection(&entries, 2, true);
+        assert_eq!(expanded["display"]["limit"]["visible_lines"], 4);
+        assert_eq!(expanded["display"]["limit"]["total_lines"], 4);
+        assert!(expanded["display"]["truncation"].is_null());
+
+        let collapsed = grep_projection(&entries, 2, false);
+        assert_eq!(collapsed["display"]["limit"]["configured"], 2);
+        assert_eq!(collapsed["display"]["limit"]["visible_lines"], 2);
+        assert_eq!(collapsed["display"]["limit"]["total_lines"], 4);
+        assert_eq!(collapsed["display"]["truncation"]["hidden_matches"], 2);
+    }
+
+    #[test]
+    fn grep_projection_has_a_semantic_empty_state() {
+        let projection = grep_projection(&[], usize::MAX, true);
+        assert_eq!(projection["empty"]["label"], maki_agent::NO_FILES_FOUND);
+        assert_eq!(projection["empty"]["group"], "grep.empty");
+        assert!(projection["display"]["truncation"].is_null());
+    }
+
+    #[test]
+    fn grep_projection_preserves_source_match_ranges() {
+        let projection = grep_projection(
+            &[maki_agent::GrepFileEntry {
+                path: "src/lib.rs".to_owned(),
+                groups: vec![maki_agent::GrepMatchGroup {
+                    lines: vec![maki_agent::GrepLine {
+                        line_nr: 2,
+                        text: "héllo".to_owned(),
+                        is_match: true,
+                        match_ranges: std::iter::once(1..3).collect(),
+                    }],
                 }],
             }],
-        }]);
+            usize::MAX,
+            true,
+        );
         let line = &projection["entries"][0]["groups"][0]["lines"][0];
         assert_eq!(line["line"], 2);
         assert_eq!(line["text"], "héllo");
@@ -1034,10 +1105,14 @@ mod tests {
             match_ranges: std::iter::once(1..2).collect(),
         };
         assert!(valid_match_ranges(&line).is_none());
-        let projection = grep_projection(&[maki_agent::GrepFileEntry {
-            path: "a".to_owned(),
-            groups: vec![maki_agent::GrepMatchGroup { lines: vec![line] }],
-        }]);
+        let projection = grep_projection(
+            &[maki_agent::GrepFileEntry {
+                path: "a".to_owned(),
+                groups: vec![maki_agent::GrepMatchGroup { lines: vec![line] }],
+            }],
+            usize::MAX,
+            true,
+        );
         assert_eq!(
             projection["entries"][0]["groups"][0]["lines"][0]["ranges"],
             serde_json::json!([])

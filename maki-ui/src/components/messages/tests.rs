@@ -7,7 +7,8 @@ use crate::repaint::expect::{OWED, QUIET};
 use crate::selection::{DocPos, Selection, SelectionZone};
 use maki_agent::tools::{BASH_TOOL_NAME, GREP_TOOL_NAME, ToolRegistry, WRITE_TOOL_NAME};
 use maki_agent::{
-    GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan, SpanStyle, ToolInput, ToolOutput,
+    GrepFileEntry, GrepLine, GrepMatchGroup, SnapshotLine, SnapshotSpan, SpanStyle, ToolInput,
+    ToolOutput,
 };
 use maki_lua::{BlockRender, PluginHost, RenderCtx};
 use maki_providers::ImageMediaType;
@@ -3714,6 +3715,236 @@ fn lua_diff_body_rehighlights_on_theme_switch() {
     assert_ne!(
         dracula, tokyonight,
         "the Lua diff body kept the old palette"
+    );
+}
+
+/// Static nonempty grep bodies render in Lua, byte for byte against the
+/// settled native block. The bridge retains native syntax, gutters, path
+/// headers, separators, and dimmed context lines.
+#[test]
+fn lua_static_grep_body_matches_native() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cases = vec![
+        vec![GrepFileEntry {
+            path: "src/lib.rs".to_owned(),
+            groups: vec![GrepMatchGroup {
+                lines: vec![
+                    GrepLine {
+                        line_nr: 1,
+                        text: "fn before() {}".to_owned(),
+                        is_match: false,
+                        match_ranges: Vec::new(),
+                    },
+                    GrepLine {
+                        line_nr: 2,
+                        text: "fn needle() {}".to_owned(),
+                        is_match: true,
+                        match_ranges: std::iter::once(3..9).collect(),
+                    },
+                ],
+            }],
+        }],
+        vec![
+            GrepFileEntry {
+                path: "src/a.rs".to_owned(),
+                groups: vec![GrepMatchGroup::single(2, "needle in a".to_owned())],
+            },
+            GrepFileEntry {
+                path: "src/b.rs".to_owned(),
+                groups: vec![GrepMatchGroup::single(100, "needle in b".to_owned())],
+            },
+        ],
+        vec![GrepFileEntry {
+            path: "src/lib.rs".to_owned(),
+            groups: vec![
+                GrepMatchGroup {
+                    lines: vec![
+                        maki_agent::GrepLine::context(2, "let before = 1;"),
+                        maki_agent::GrepLine::matched(3, "let needle = true;"),
+                        maki_agent::GrepLine::context(4, "let after = 2;"),
+                    ],
+                },
+                GrepMatchGroup::single(40, "let needle = false;"),
+            ],
+        }],
+        vec![GrepFileEntry {
+            path: "notes.unknownext".to_owned(),
+            groups: vec![GrepMatchGroup::single(1, "café α 日本")],
+        }],
+    ];
+
+    for theme in [
+        theme::load_by_name("dracula").expect("dracula theme"),
+        theme::load_by_name("tokyonight").expect("tokyonight theme"),
+    ] {
+        theme::set(theme);
+        for status in [ToolStatus::Success, ToolStatus::Error] {
+            for width in [24, 80, 200] {
+                for entries in &cases {
+                    let mut message =
+                        tool_message_with(status, Some("2 matches"), Some("1.2k"), Some("12:00"));
+                    message.tool_output = Some(Arc::new(ToolOutput::GrepResult {
+                        entries: entries.clone(),
+                    }));
+                    let output_lines = maki_config::ToolOutputLines::default();
+                    let rctx = crate::components::tool_display::RenderCtx {
+                        started_at: Instant::now(),
+                        width,
+                        tool_output_lines: &output_lines,
+                    };
+                    let native = MessagesPanel::build_tool_segment_lines(
+                        &message,
+                        status,
+                        &rctx,
+                        SectionFlags {
+                            script: false,
+                            output: true,
+                        },
+                    );
+                    let (native_lines, native_spinners) = settled_native(native);
+                    let objects = block_objects(&message, width, None);
+                    let rendered = block::render(&objects).expect("static Lua grep body");
+                    assert!(rendered.tool.is_none(), "Lua must render the grep body");
+                    assert_eq!(
+                        composed(rendered),
+                        with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
+                        "status={status:?} width={width} entries={entries:?}"
+                    );
+                    let Some(ToolOutput::GrepResult { entries: kept }) =
+                        message.tool_output.as_deref()
+                    else {
+                        panic!("grep source must remain immutable");
+                    };
+                    assert_eq!(kept.len(), entries.len());
+                    assert!(kept.iter().zip(entries).all(|(kept, source)| {
+                        kept.path == source.path && kept.groups.len() == source.groups.len()
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// Empty, collapsed, truncated, in-progress, and host-streamed grep bodies
+/// remain native until Lua owns their interaction and live-state handling.
+#[test_case(ToolStatus::InProgress, usize::MAX, true, false ; "in_progress")]
+#[test_case(ToolStatus::Success, usize::MAX, true, true ; "empty")]
+#[test_case(ToolStatus::Success, 1, false, false ; "collapsed_truncated")]
+#[test_case(ToolStatus::Success, usize::MAX, true, false ; "streamed")]
+fn lua_tool_uses_native_marker_for_non_static_grep_body(
+    status: ToolStatus,
+    limit: usize,
+    expanded: bool,
+    empty: bool,
+) {
+    crate::markdown::install_render_bridges();
+    let mut message = tool_message_with(status, None, None, None);
+    message.tool_output = Some(Arc::new(ToolOutput::GrepResult {
+        entries: if empty {
+            Vec::new()
+        } else {
+            vec![GrepFileEntry {
+                path: "src/lib.rs".to_owned(),
+                groups: (1..=3)
+                    .map(|line_nr| GrepMatchGroup::single(line_nr, format!("needle {line_nr}")))
+                    .collect(),
+            }]
+        },
+    }));
+    if status == ToolStatus::Success && limit == usize::MAX && expanded && !empty {
+        message.render_snapshot = Some(rendered_snapshot());
+    }
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+    let reply = host.event_handle().request_render_block(
+        block::project_with_tool_display(&message, limit, expanded),
+        RenderCtx {
+            width: 80,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
+    else {
+        panic!("objects");
+    };
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    );
+}
+
+/// A theme change must recompute the host spans for a grep body too.
+#[test]
+fn lua_grep_body_rehighlights_on_theme_switch() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let message = {
+        let mut message = tool_message_with(ToolStatus::Success, None, None, None);
+        message.tool_output = Some(Arc::new(ToolOutput::GrepResult {
+            entries: vec![GrepFileEntry {
+                path: "src/lib.rs".to_owned(),
+                groups: vec![GrepMatchGroup::single(1, "let café = true;")],
+            }],
+        }));
+        message
+    };
+    let body_styles = |name: &str| {
+        theme::set(theme::load_by_name(name).expect(name));
+        let objects = block_objects(&message, 80, None);
+        let rendered = block::render(&objects).expect("static Lua grep body");
+        composed(rendered)
+            .iter()
+            .skip(1)
+            .flat_map(|line| line.spans.iter().map(|span| span.style))
+            .collect::<Vec<_>>()
+    };
+
+    let dracula = body_styles("dracula");
+    let tokyonight = body_styles("tokyonight");
+
+    assert!(!dracula.is_empty());
+    assert_ne!(
+        dracula, tokyonight,
+        "the Lua grep body kept the old palette"
+    );
+}
+
+/// The projected match ranges stay unused: native colours match lines from
+/// syntax, so the bridge must not paint the ranges.
+#[test]
+fn lua_grep_body_ignores_projected_match_ranges() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    theme::set(theme::load_by_name("dracula").expect("dracula theme"));
+    let message = |match_ranges: Vec<Range<usize>>| {
+        let mut message = tool_message_with(ToolStatus::Success, None, None, None);
+        message.tool_output = Some(Arc::new(ToolOutput::GrepResult {
+            entries: vec![GrepFileEntry {
+                path: "src/lib.rs".to_owned(),
+                groups: vec![GrepMatchGroup {
+                    lines: vec![GrepLine {
+                        line_nr: 1,
+                        text: "let needle = true;".to_owned(),
+                        is_match: true,
+                        match_ranges,
+                    }],
+                }],
+            }],
+        }));
+        message
+    };
+    let styles = |message: &DisplayMessage| {
+        let objects = block_objects(message, 80, None);
+        let rendered = block::render(&objects).expect("static Lua grep body");
+        composed(rendered)
+            .into_iter()
+            .skip(1)
+            .flat_map(|line| line.spans.into_iter().map(|span| span.style))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        styles(&message(Vec::new())),
+        styles(&message(vec![Range { start: 4, end: 10 }]))
     );
 }
 

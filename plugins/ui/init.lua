@@ -150,6 +150,30 @@ local function tool_diff(diff, status, ctx)
   return lines, true
 end
 
+-- Static, nonempty, untruncated grep bodies, drawn by the host's temporary
+-- parity bridge. Match ranges remain structured source data for the future
+-- real Lua/Tree-sitter renderer; they intentionally do not alter this bridge.
+local function tool_grep(grep, status, ctx)
+  if not grep then
+    return nil, false
+  end
+  if status == STATUS_IN_PROGRESS or grep.empty then
+    return nil, true
+  end
+  local display = grep.display
+  if not (display and display.expanded and not display.truncation) then
+    return nil, true
+  end
+  local lines = maki.ui.transcript_grep(grep, ctx.width - 2)
+  if not lines then
+    return nil, true
+  end
+  for _, line in ipairs(lines) do
+    table.insert(line, 1, { "  ", {} })
+  end
+  return lines, true
+end
+
 local function tool_body(body, ctx)
   if not body then
     return nil
@@ -246,6 +270,9 @@ local function tool_lines(block, ctx)
   if authority == nil or authority == BODY_NONE then
     local handled
     body, handled = tool_diff(tool.diff, tool.status, ctx)
+    if not handled then
+      body, handled = tool_grep(tool.grep, tool.status, ctx)
+    end
     if not handled then
       body, handled = tool_code(tool.code, tool.status, ctx)
     end

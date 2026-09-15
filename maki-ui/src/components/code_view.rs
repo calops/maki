@@ -279,16 +279,52 @@ fn diff_change_spans(
     spans
 }
 
-fn render_grep_results(
-    entries: &[GrepFileEntry],
-    max_lines: usize,
-    highlight: bool,
-) -> (Vec<Line<'static>>, bool) {
-    let mut out = Vec::new();
-    let mut budget = max_lines;
-    let total_matches: usize = entries.iter().map(|e| e.match_count()).sum();
-    let mut rendered_matches: usize = 0;
+/// One row a grep body draws, as an index into the result so planning stays
+/// allocation free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrepRow {
+    Path(usize),
+    Separator,
+    Line {
+        entry: usize,
+        group: usize,
+        line: usize,
+    },
+}
 
+/// The authoritative grep budget walk. The renderer paints these rows and the
+/// renderer projection reads the counts, so truncation cannot drift between
+/// what the transcript draws and what a renderer is told.
+pub(crate) struct GrepLayoutPlan {
+    pub rows: Vec<GrepRow>,
+    pub nr_width: usize,
+    pub total_rows: usize,
+    pub hidden_matches: usize,
+    pub truncated: bool,
+}
+
+/// Every row the result would draw with an unbounded budget, in draw order.
+/// File headers are free, separators and lines each cost one row.
+fn grep_rows(entries: &[GrepFileEntry], multi: bool) -> impl Iterator<Item = GrepRow> + '_ {
+    entries.iter().enumerate().flat_map(move |(entry, e)| {
+        let has_context = e.groups.iter().any(|g| g.lines.len() > 1);
+        let mut rows = Vec::new();
+        if multi {
+            rows.push(GrepRow::Path(entry));
+        }
+        for (group, g) in e.groups.iter().enumerate() {
+            if group > 0 && has_context {
+                rows.push(GrepRow::Separator);
+            }
+            rows.extend((0..g.lines.len()).map(|line| GrepRow::Line { entry, group, line }));
+        }
+        rows
+    })
+}
+
+pub(crate) fn plan_grep_layout(entries: &[GrepFileEntry], max_lines: usize) -> GrepLayoutPlan {
+    let multi = entries.len() > 1;
+    let total_rows = grep_rows(entries, multi).count();
     let global_max_nr = entries
         .iter()
         .flat_map(|e| {
@@ -298,41 +334,66 @@ fn render_grep_results(
         })
         .max()
         .unwrap_or(1);
-    let w = nr_width(global_max_nr);
-    let multi = entries.len() > 1;
-    let dim = theme::current().tool_dim;
+    let total_matches: usize = entries.iter().map(|e| e.match_count()).sum();
 
-    for entry in entries {
+    let mut rows = Vec::new();
+    let mut budget = max_lines;
+    let mut painted_matches = 0;
+    for row in grep_rows(entries, multi) {
         if budget == 0 {
             break;
         }
-
-        if multi {
-            out.push(Line::from(Span::styled(
-                entry.path.clone(),
-                theme::current().tool_path,
-            )));
+        if let GrepRow::Line { entry, group, line } = row {
+            if entries[entry].groups[group].lines[line].is_match {
+                painted_matches += 1;
+            }
+            budget -= 1;
+        } else if matches!(row, GrepRow::Separator) {
+            budget -= 1;
         }
+        rows.push(row);
+    }
 
-        let syntax = highlight.then(|| maki_highlight::syntax_for_path(&entry.path));
-        let has_context = entry.groups.iter().any(|g| g.lines.len() > 1);
+    let hidden_matches = if budget == 0 {
+        total_matches - painted_matches
+    } else {
+        0
+    };
+    GrepLayoutPlan {
+        rows,
+        nr_width: nr_width(global_max_nr),
+        total_rows,
+        hidden_matches,
+        truncated: should_truncate(hidden_matches),
+    }
+}
 
-        for (gi, group) in entry.groups.iter().enumerate() {
-            if budget == 0 {
-                break;
-            }
-            if gi > 0 && has_context {
-                out.push(Line::from(Span::styled("  --".to_owned(), dim)));
-                budget -= 1;
-            }
-            for line in &group.lines {
-                if budget == 0 {
-                    break;
-                }
+fn render_grep_results(
+    entries: &[GrepFileEntry],
+    max_lines: usize,
+    highlight: bool,
+) -> (Vec<Line<'static>>, bool) {
+    let plan = plan_grep_layout(entries, max_lines);
+    let theme = theme::current();
+    let w = plan.nr_width;
+    let dim = theme.tool_dim;
+    let mut out = Vec::with_capacity(plan.rows.len());
+
+    for row in &plan.rows {
+        match *row {
+            GrepRow::Path(entry) => out.push(Line::from(Span::styled(
+                entries[entry].path.clone(),
+                theme.tool_path,
+            ))),
+            GrepRow::Separator => out.push(Line::from(Span::styled("  --".to_owned(), dim))),
+            GrepRow::Line { entry, group, line } => {
+                let line = &entries[entry].groups[group].lines[line];
                 let mut spans = vec![gutter(&format!("{:>w$}", line.line_nr))];
-                let text_spans = if let Some(syn) = syntax {
+                let text_spans = if highlight {
                     highlight_spans(
-                        &mut maki_highlight::Highlighter::for_syntax(syn),
+                        &mut maki_highlight::Highlighter::for_syntax(
+                            maki_highlight::syntax_for_path(&entries[entry].path),
+                        ),
                         &line.text,
                     )
                 } else if line.is_match {
@@ -342,7 +403,6 @@ fn render_grep_results(
                 };
                 if line.is_match {
                     spans.extend(text_spans);
-                    rendered_matches += 1;
                 } else {
                     spans.extend(
                         text_spans
@@ -351,20 +411,14 @@ fn render_grep_results(
                     );
                 }
                 out.push(Line::from(spans));
-                budget -= 1;
             }
         }
     }
-    let hidden = if budget == 0 {
-        total_matches - rendered_matches
-    } else {
-        0
-    };
-    let truncated = should_truncate(hidden);
-    if truncated {
-        out.push(truncation_line(hidden));
+
+    if plan.truncated {
+        out.push(truncation_line(plan.hidden_matches));
     }
-    (out, truncated)
+    (out, plan.truncated)
 }
 
 pub(crate) fn render_instructions(
@@ -470,6 +524,12 @@ pub fn transcript_code_content(
 /// settled lines, with the concrete styles taken from the active Rust theme.
 /// It is not the semantic-decoration target.
 pub fn transcript_diff_content(output: &ToolOutput, limits: RenderLimits) -> ToolContent {
+    render_tool_content(None, Some(output), true, limits)
+}
+
+/// The host side of `maki.ui.transcript_grep`. Temporary parity bridge: it
+/// preserves native gutters, path headers, context dimming, and Syntect spans.
+pub fn transcript_grep_content(output: &ToolOutput, limits: RenderLimits) -> ToolContent {
     render_tool_content(None, Some(output), true, limits)
 }
 
