@@ -1281,6 +1281,39 @@ fn toggle_expand_collapse_grep_tool() {
     assert!(seg_text(&panel, "t1").contains("click to expand"));
 }
 
+/// A host-owned body keeps the native lines and the native interaction: the
+/// truncation window still expands on click.
+#[test]
+fn host_owned_code_body_keeps_native_metadata_and_expands() {
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    panel.tool_start(start("t1", "read"));
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: "read".into(),
+        output: Arc::new(ToolOutput::ReadCode {
+            path: "file.rs".into(),
+            start_line: 1,
+            lines: (1..=8).map(|i| format!("line {i}")).collect(),
+            total_lines: 8,
+            instructions: None,
+        }),
+        is_error: false,
+        annotation: None,
+        written_path: None,
+    });
+    render(&mut panel, 80, 24);
+
+    let area = Rect::new(0, 0, 80, 24);
+    let collapsed = seg_text(&panel, "t1");
+    assert!(collapsed.contains("line 1"), "{collapsed}");
+    assert!(!collapsed.contains("line 8"), "{collapsed}");
+
+    assert!(panel.toggle_expansion_at(area.y, area));
+    render(&mut panel, 80, 24);
+    let expanded = seg_text(&panel, "t1");
+    assert!(expanded.contains("line 8"), "{expanded}");
+}
+
 fn buffer_text(terminal: &ratatui::Terminal<TestBackend>) -> String {
     let buf = terminal.backend().buffer();
     let mut text = String::new();
@@ -3521,31 +3554,32 @@ fn lua_static_body_defers_to_a_streamed_host_body(output: ToolOutput, input: Opt
         message.render_snapshot = snapshot;
         message
     };
-    let has_marker = |message: &DisplayMessage| {
-        let objects = block_objects(message, 80, None);
-        (
-            objects
-                .iter()
-                .any(|object| matches!(object, maki_lua::RenderObject::ToolBody)),
-            objects,
+    let owner = |message: &DisplayMessage| {
+        block::tool_body_owner(
+            message,
+            usize::MAX,
+            SectionFlags {
+                script: true,
+                output: true,
+            },
         )
     };
 
-    let (marker, objects) = has_marker(&message(None));
-    assert!(
-        !marker,
-        "a static eligible body must render in Lua: {objects:?}"
+    assert_eq!(
+        owner(&message(None)),
+        block::BodyOwner::Lua,
+        "a static eligible body must render in Lua"
     );
     let snapshot = BufferSnapshot::plain_text("streamed body".into());
-    let (marker, objects) = has_marker(&message(Some(snapshot)));
-    assert!(
-        marker,
-        "a streamed host body must keep the native marker: {objects:?}"
+    assert_eq!(
+        owner(&message(Some(snapshot))),
+        block::BodyOwner::Host,
+        "a streamed host body must stay on the host path"
     );
-    let (marker, objects) = has_marker(&message(None));
-    assert!(
-        !marker,
-        "clearing the host body must hand the block back to Lua: {objects:?}"
+    assert_eq!(
+        owner(&message(None)),
+        block::BodyOwner::Lua,
+        "clearing the host body must hand the block back to Lua"
     );
 }
 
@@ -3662,23 +3696,16 @@ fn lua_tool_uses_native_marker_for_non_static_diff_body(status: ToolStatus, stre
     if streamed {
         message.render_snapshot = Some(rendered_snapshot());
     }
-    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-    let reply = host.event_handle().request_render_block(
-        block::project_with_tool_display(&message, usize::MAX, true),
-        RenderCtx {
-            width: 80,
-            mode: Arc::from("build"),
-            theme_gen: theme::generation(),
-        },
-    );
-    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
-    else {
-        panic!("objects");
-    };
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    assert_eq!(
+        block::tool_body_owner(
+            &message,
+            usize::MAX,
+            SectionFlags {
+                script: true,
+                output: true,
+            },
+        ),
+        block::BodyOwner::Host
     );
 }
 
@@ -3854,23 +3881,16 @@ fn lua_tool_uses_native_marker_for_non_static_grep_body(
     if status == ToolStatus::Success && limit == usize::MAX && expanded && !empty {
         message.render_snapshot = Some(rendered_snapshot());
     }
-    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-    let reply = host.event_handle().request_render_block(
-        block::project_with_tool_display(&message, limit, expanded),
-        RenderCtx {
-            width: 80,
-            mode: Arc::from("build"),
-            theme_gen: theme::generation(),
-        },
-    );
-    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
-    else {
-        panic!("objects");
-    };
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    assert_eq!(
+        block::tool_body_owner(
+            &message,
+            limit,
+            SectionFlags {
+                script: expanded,
+                output: expanded,
+            },
+        ),
+        block::BodyOwner::Host
     );
 }
 
@@ -4009,13 +4029,11 @@ fn lua_static_instructions_body_matches_native(blocks: Vec<maki_agent::Instructi
     }
 }
 
-/// A collapsed instructions body keeps the host body, whether or not the
-/// budget also cut it short: Lua places the host's own lines through the
-/// dedicated marker.
+/// Collapsed instruction bodies stay host-owned, truncated or not, because the
+/// expansion click lives in the host's metadata.
 #[test_case(2 ; "fits")]
 #[test_case(20 ; "truncated")]
 fn lua_instructions_body_uses_the_host_marker_when_collapsed(lines: usize) {
-    crate::markdown::install_render_bridges();
     let blocks = vec![maki_agent::InstructionBlock {
         path: "AGENTS.md".into(),
         content: (1..=lines)
@@ -4023,97 +4041,58 @@ fn lua_instructions_body_uses_the_host_marker_when_collapsed(lines: usize) {
             .collect::<Vec<_>>()
             .join("\n"),
     }];
-    let limit = crate::components::code_view::instruction_limit(false);
-    let block = block::project_instructions("t1__inst", "t1", &blocks, limit, false);
-    let objects = objects_for_block(block, 80);
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::InstructionsBody))
-    );
-}
-/// Every non-static code case keeps the host body: live output, collapsed
-/// sections, and truncated sections alike.
-#[test_case(ToolStatus::InProgress, usize::MAX, true ; "in_progress")]
-#[test_case(ToolStatus::Success, usize::MAX, false ; "collapsed")]
-#[test_case(ToolStatus::Success, 1, false ; "truncated")]
-fn lua_tool_uses_native_marker_for_non_static_code_body(
-    status: ToolStatus,
-    limit: usize,
-    expanded: bool,
-) {
-    crate::markdown::install_render_bridges();
-    let message = code_message(status);
-    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-    let reply = host.event_handle().request_render_block(
-        block::project_with_tool_display(&message, limit, expanded),
-        RenderCtx {
-            width: 80,
-            mode: Arc::from("build"),
-            theme_gen: theme::generation(),
-        },
-    );
-    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
-    else {
-        panic!("objects");
-    };
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    assert_eq!(
+        block::instructions_body_owner(&blocks, false),
+        block::BodyOwner::Host
     );
 }
 
-#[test_case(usize::MAX, false ; "collapsed")]
-#[test_case(1, false ; "truncated")]
-fn lua_tool_uses_native_marker_for_non_static_markdown_body(limit: usize, expanded: bool) {
-    crate::markdown::install_render_bridges();
-    let message = tool_message();
-    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-    let reply = host.event_handle().request_render_block(
-        block::project_with_tool_display(&message, limit, expanded),
-        RenderCtx {
-            width: 80,
-            mode: Arc::from("build"),
-            theme_gen: theme::generation(),
-        },
-    );
-    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
-    else {
-        panic!("objects");
-    };
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
-    );
-}
-
+/// An expanded instructions body stays host-owned when the budget still cuts
+/// it, and is Lua's only when the whole body fits.
 #[test]
-fn lua_tool_uses_native_marker_for_collapsed_plain_body() {
-    crate::markdown::install_render_bridges();
-    let message = tool_message();
-    let objects = {
-        const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-        let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-        let reply = host.event_handle().request_render_block(
-            block::project_with_tool_display(&message, 1, false),
-            RenderCtx {
-                width: 80,
-                mode: Arc::from("build"),
-                theme_gen: theme::generation(),
-            },
-        );
-        let BlockRender::Objects(objects) = reply.recv_timeout(REPLY_TIMEOUT).expect("reply")
-        else {
-            panic!("objects");
-        };
-        objects
+fn lua_instructions_body_owner_follows_the_budget() {
+    let blocks = |lines: usize| {
+        vec![maki_agent::InstructionBlock {
+            path: "AGENTS.md".into(),
+            content: (1..=lines)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }]
     };
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    assert_eq!(
+        block::instructions_body_owner(&blocks(20), true),
+        block::BodyOwner::Lua,
+        "expanded uses an unbounded budget, so nothing is hidden"
+    );
+    assert_eq!(
+        block::instructions_body_owner(&blocks(2), true),
+        block::BodyOwner::Lua
+    );
+}
+
+/// Live, truncated, and streamed tool bodies stay on the host path.
+#[test_case(ToolStatus::InProgress, 20, false ; "in_progress")]
+#[test_case(ToolStatus::Success, 2, false ; "truncated")]
+fn lua_tool_body_owner_keeps_the_host_for_unfit_code(status: ToolStatus, limit: usize, wide: bool) {
+    let mut message = code_message(status);
+    message.tool_output = Some(Arc::new(ToolOutput::ReadCode {
+        path: "src/lib.rs".to_owned(),
+        start_line: 10,
+        lines: (1..=8).map(|i| format!("line {i}")).collect(),
+        total_lines: 18,
+        instructions: None,
+    }));
+    assert_eq!(
+        block::tool_body_owner(
+            &message,
+            limit,
+            SectionFlags {
+                script: wide,
+                output: wide,
+            },
+        ),
+        block::BodyOwner::Host
     );
 }
 
@@ -4244,30 +4223,25 @@ fg = "#ff0000"
 fn lua_tool_uses_native_marker_for_collapsed_todo_body() {
     crate::markdown::install_render_bridges();
     let mut message = tool_message();
-    message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![
-        maki_agent::types::TodoItem {
-            content: "todo".to_owned(),
-            status: maki_agent::types::TodoStatus::Pending,
-            priority: maki_agent::types::TodoPriority::Medium,
-        },
-    ])));
-    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-    let reply = host.event_handle().request_render_block(
-        block::project_with_tool_display(&message, usize::MAX, false),
-        RenderCtx {
-            width: 80,
-            mode: Arc::from("build"),
-            theme_gen: theme::generation(),
-        },
-    );
-    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
-    else {
-        panic!("objects");
-    };
-    assert!(
-        objects
-            .iter()
-            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    message.tool_output = Some(Arc::new(ToolOutput::TodoList(
+        (1..=4)
+            .map(|i| maki_agent::types::TodoItem {
+                content: format!("todo {i}"),
+                status: maki_agent::types::TodoStatus::Pending,
+                priority: maki_agent::types::TodoPriority::Medium,
+            })
+            .collect(),
+    )));
+    assert_eq!(
+        block::tool_body_owner(
+            &message,
+            2,
+            SectionFlags {
+                script: false,
+                output: false,
+            },
+        ),
+        block::BodyOwner::Host
     );
 }
 

@@ -357,6 +357,95 @@ fn visible_code_lines(total_lines: usize, limit: usize, expanded: bool) -> usize
     }
 }
 
+/// Who composes a tool or instruction block. Lua owns the states it can compose
+/// exactly; the host keeps the states whose interaction metadata it must supply,
+/// such as a clickable truncation window or a streamed body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BodyOwner {
+    Lua,
+    Host,
+}
+
+/// The single authority for who owns a tool block's lines.
+pub(crate) fn tool_body_owner(
+    message: &DisplayMessage,
+    limit: usize,
+    expanded: SectionFlags,
+) -> BodyOwner {
+    let DisplayRole::Tool(tool) = &message.role else {
+        return BodyOwner::Lua;
+    };
+    if tool.status == ToolStatus::InProgress || body_authority(message) != "none" {
+        return BodyOwner::Host;
+    }
+    let Some(output) = message.tool_output.as_deref() else {
+        return BodyOwner::Host;
+    };
+    match output {
+        ToolOutput::Diff { .. } => BodyOwner::Lua,
+        ToolOutput::GrepResult { entries } => {
+            if entries.is_empty() {
+                return BodyOwner::Host;
+            }
+            let effective = if expanded.output { usize::MAX } else { limit };
+            if crate::components::code_view::plan_grep_layout(entries, effective).truncated {
+                BodyOwner::Host
+            } else {
+                BodyOwner::Lua
+            }
+        }
+        ToolOutput::TodoList(items) => one_section(items.len(), limit, expanded.output),
+        ToolOutput::Plain(text) | ToolOutput::Markdown(text) | ToolOutput::ReadDir(text) => {
+            one_section(logical_line_count(&text.text), limit, expanded.output)
+        }
+        ToolOutput::Batch { text } => one_section(logical_line_count(text), limit, expanded.output),
+        ToolOutput::ReadCode { lines, .. } => {
+            let output = visible_code_lines(lines.len(), limit, expanded.output) == lines.len();
+            match message.tool_input.as_deref() {
+                Some(maki_agent::ToolInput::Code { code, .. })
+                | Some(maki_agent::ToolInput::Script { code, .. }) => {
+                    let total = logical_line_count(code.trim_end_matches('\n'));
+                    if visible_code_lines(total, limit, expanded.script) == total && output {
+                        BodyOwner::Lua
+                    } else {
+                        BodyOwner::Host
+                    }
+                }
+                None => BodyOwner::Host,
+            }
+        }
+        // Images carry no body lines, and legacy inline instruction bodies have
+        // no bridge: both stay on the host path permanently.
+        _ => BodyOwner::Host,
+    }
+}
+
+/// One body section fits when the budget hides nothing.
+fn one_section(total: usize, limit: usize, expanded: bool) -> BodyOwner {
+    if visible_code_lines(total, limit, expanded) == total {
+        BodyOwner::Lua
+    } else {
+        BodyOwner::Host
+    }
+}
+
+/// Who composes an instruction segment's lines. The host keeps every collapsed
+/// or truncated state, because the expansion click lives in its metadata.
+pub(crate) fn instructions_body_owner(
+    blocks: &[maki_agent::InstructionBlock],
+    expanded: bool,
+) -> BodyOwner {
+    if !expanded || blocks.is_empty() {
+        return BodyOwner::Host;
+    }
+    let limit = crate::components::code_view::instruction_limit(true);
+    if crate::components::code_view::plan_instructions_layout(blocks, limit).truncated {
+        BodyOwner::Host
+    } else {
+        BodyOwner::Lua
+    }
+}
+
 fn tool_body_projection(
     output: &ToolOutput,
     limit: usize,

@@ -910,22 +910,11 @@ impl MessagesPanel {
             if !block_render.needs(id, revision, &key) {
                 continue;
             }
-            let block = Self::instruction_block(segment, messages, expanded_tools).or_else(|| {
-                let message = segment.msg_index.and_then(|i| messages.get(i))?;
-                let (output_limit, expanded) = match &message.role {
-                    DisplayRole::Tool(tool) => (
-                        tool_output_lines.get(&tool.name),
-                        expanded_tools.get(&tool.id).copied().unwrap_or_default(),
-                    ),
-                    _ => (0, SectionFlags::default()),
-                };
-                Some(block::project_with_tool_sections(
-                    message,
-                    output_limit,
-                    expanded,
-                ))
-            });
-            let Some(block) = block else { continue };
+            let block = Self::segment_block(segment, messages, expanded_tools, &tool_output_lines);
+            let Some(block) = block else {
+                Self::reset_unrenderable(segment);
+                continue;
+            };
             block_render.request(id, revision, block, key.clone(), |block, ctx| {
                 lua_event_handle.request_render_block(block, ctx)
             });
@@ -1029,26 +1018,46 @@ impl MessagesPanel {
         Dirty::from(changed)
     }
 
-    /// The synthetic projection for an instruction segment, when this segment
-    /// is one and its parent still carries blocks.
-    fn instruction_block(
+    /// Whether the host or Lua composes this segment, and the projection to
+    /// send when Lua does.
+    fn segment_block(
         segment: &Segment,
         messages: &[DisplayMessage],
         expanded_tools: &HashMap<String, SectionFlags>,
+        tool_output_lines: &ToolOutputLines,
     ) -> Option<serde_json::Value> {
-        let id = segment.tool_id.as_deref()?;
-        if !segment::is_instruction_segment(id) {
+        if let Some(id) = segment.tool_id.as_deref()
+            && segment::is_instruction_segment(id)
+        {
+            let parent = segment::instruction_parent(id)?;
+            let blocks = instructions_for(messages, parent)?;
+            let expanded = expanded_tools.get(id).copied().unwrap_or_default();
+            if block::instructions_body_owner(&blocks, expanded.output) == block::BodyOwner::Host {
+                return None;
+            }
+            return Some(block::project_instructions(
+                id,
+                parent,
+                &blocks,
+                crate::components::code_view::instruction_limit(expanded.output),
+                expanded.output,
+            ));
+        }
+        let message = segment.msg_index.and_then(|i| messages.get(i))?;
+        let (output_limit, expanded) = match &message.role {
+            DisplayRole::Tool(tool) => (
+                tool_output_lines.get(&tool.name),
+                expanded_tools.get(&tool.id).copied().unwrap_or_default(),
+            ),
+            _ => (0, SectionFlags::default()),
+        };
+        if block::tool_body_owner(message, output_limit, expanded) == block::BodyOwner::Host {
             return None;
         }
-        let parent = segment::instruction_parent(id)?;
-        let blocks = instructions_for(messages, parent)?;
-        let expanded = expanded_tools.get(id).copied().unwrap_or_default();
-        Some(block::project_instructions(
-            id,
-            parent,
-            &blocks,
-            crate::components::code_view::instruction_limit(expanded.output),
-            expanded.output,
+        Some(block::project_with_tool_sections(
+            message,
+            output_limit,
+            expanded,
         ))
     }
 

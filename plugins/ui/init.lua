@@ -102,85 +102,55 @@ local function tool_indicator(status)
   return { TOOL_INDICATOR, status == ERROR and "tool_error" or SUCCESS_STYLE }
 end
 
--- Static code input and read output, drawn by the host's temporary parity
--- bridge. Anything live, collapsed, or truncated keeps the native body.
-local function tool_code(code, status, ctx)
+-- The host routes only blocks it has decided Lua owns, so these composers
+-- check for data and for a live bridge, never for eligibility.
+local function tool_code(code, ctx)
   if not code then
-    return nil, false
-  end
-  if status == STATUS_IN_PROGRESS then
-    return nil, true
-  end
-  local input = code.input
-  local output = code.output
-  if input and not (input.display.expanded and not input.display.truncation) then
-    return nil, true
-  end
-  if output and not (output.display.expanded and not output.display.truncation) then
-    return nil, true
+    return nil
   end
   local lines = maki.ui.transcript_code(code, ctx.width - 2)
   if not lines then
-    return nil, true
+    return nil
   end
   for _, line in ipairs(lines) do
     table.insert(line, 1, { "  ", {} })
   end
-  return lines, true
+  return lines
 end
 
--- The host's body for the kinds Lua renders itself. Returns nil when the
--- body is not a static, expanded, untruncated one, so the caller can fall
--- back to the native marker.
--- Static diff bodies, drawn by the host's temporary parity bridge. Diffs are
--- never truncated, so the only gate is a live or host-owned body.
-local function tool_diff(diff, status, ctx)
+-- Diff bodies, drawn by the host's temporary parity bridge.
+local function tool_diff(diff, ctx)
   if not diff then
-    return nil, false
-  end
-  if status == STATUS_IN_PROGRESS then
-    return nil, true
+    return nil
   end
   local lines = maki.ui.transcript_diff(diff, ctx.width - 2)
   if not lines then
-    return nil, true
+    return nil
   end
   for _, line in ipairs(lines) do
     table.insert(line, 1, { "  ", {} })
   end
-  return lines, true
+  return lines
 end
 
--- Static, nonempty, untruncated grep bodies, drawn by the host's temporary
--- parity bridge. Match ranges remain structured source data for the future
--- real Lua/Tree-sitter renderer; they intentionally do not alter this bridge.
-local function tool_grep(grep, status, ctx)
+-- Grep bodies, drawn by the host's temporary parity bridge. Match ranges
+-- remain structured source data for the future real Lua/Tree-sitter renderer.
+local function tool_grep(grep, ctx)
   if not grep then
-    return nil, false
-  end
-  if status == STATUS_IN_PROGRESS or grep.empty then
-    return nil, true
-  end
-  local display = grep.display
-  if not (display and display.expanded and not display.truncation) then
-    return nil, true
+    return nil
   end
   local lines = maki.ui.transcript_grep(grep, ctx.width - 2)
   if not lines then
-    return nil, true
+    return nil
   end
   for _, line in ipairs(lines) do
     table.insert(line, 1, { "  ", {} })
   end
-  return lines, true
+  return lines
 end
 
 local function tool_body(body, ctx)
   if not body then
-    return nil
-  end
-  local display = body.display
-  if not (display and display.expanded and not display.truncation) then
     return nil
   end
   if body.kind == "todo_list" then
@@ -264,20 +234,17 @@ local function tool_lines(block, ctx)
   if tool.timestamp then
     maki.ui.right_info(spans, tool.usage, tool.timestamp, ctx.width)
   end
-  -- A host-owned streamed body wins over anything composed here, so it keeps
-  -- the native marker. Authority changes rebuild the block, which re-runs this.
   local authority = tool.body_authority
   local body
   if authority == nil or authority == BODY_NONE then
-    local handled
-    body, handled = tool_diff(tool.diff, tool.status, ctx)
-    if not handled then
-      body, handled = tool_grep(tool.grep, tool.status, ctx)
+    body = tool_diff(tool.diff, ctx)
+    if not body then
+      body = tool_grep(tool.grep, ctx)
     end
-    if not handled then
-      body, handled = tool_code(tool.code, tool.status, ctx)
+    if not body then
+      body = tool_code(tool.code, ctx)
     end
-    if not handled then
+    if not body then
       body = tool_body(tool.body, ctx)
     end
   end
@@ -303,20 +270,16 @@ local function instruction_lines(block, ctx)
   if header.annotation then
     spans[#spans + 1] = { " (" .. header.annotation .. ")", TOOL_ANNOTATION_STYLE }
   end
-  local display = block.display
-  local eligible = display and display.expanded and not display.truncation
-  if eligible then
-    local lines = maki.ui.transcript_instructions({ blocks = block.blocks }, ctx.width - 2)
-    if lines then
-      for _, line in ipairs(lines) do
-        table.insert(line, 1, { "  ", {} })
-      end
-      local out = { spans }
-      for _, line in ipairs(lines) do
-        out[#out + 1] = line
-      end
-      return out
+  local lines = maki.ui.transcript_instructions({ blocks = block.blocks }, ctx.width - 2)
+  if lines then
+    for _, line in ipairs(lines) do
+      table.insert(line, 1, { "  ", {} })
     end
+    local out = { spans }
+    for _, line in ipairs(lines) do
+      out[#out + 1] = line
+    end
+    return out
   end
   return { spans, maki.ui.transcript_instructions_body() }
 end
