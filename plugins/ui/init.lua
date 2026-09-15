@@ -131,6 +131,25 @@ end
 -- The host's body for the kinds Lua renders itself. Returns nil when the
 -- body is not a static, expanded, untruncated one, so the caller can fall
 -- back to the native marker.
+-- Static diff bodies, drawn by the host's temporary parity bridge. Diffs are
+-- never truncated, so the only gate is a live or host-owned body.
+local function tool_diff(diff, status, ctx)
+  if not diff then
+    return nil, false
+  end
+  if status == STATUS_IN_PROGRESS then
+    return nil, true
+  end
+  local lines = maki.ui.transcript_diff(diff, ctx.width - 2)
+  if not lines then
+    return nil, true
+  end
+  for _, line in ipairs(lines) do
+    table.insert(line, 1, { "  ", {} })
+  end
+  return lines, true
+end
+
 local function tool_body(body, ctx)
   if not body then
     return nil
@@ -225,9 +244,12 @@ local function tool_lines(block, ctx)
   local authority = tool.body_authority
   local body
   if authority == nil or authority == BODY_NONE then
-    local has_code
-    body, has_code = tool_code(tool.code, tool.status, ctx)
-    if not has_code then
+    local handled
+    body, handled = tool_diff(tool.diff, tool.status, ctx)
+    if not handled then
+      body, handled = tool_code(tool.code, tool.status, ctx)
+    end
+    if not handled then
       body = tool_body(tool.body, ctx)
     end
   end

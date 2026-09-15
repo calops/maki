@@ -3573,6 +3573,150 @@ fn a_streamed_body_bumps_the_block_revision() {
     assert!(revision(&panel) > before, "a streamed body must re-render");
 }
 
+/// Static diff bodies render in Lua, byte for byte against the settled native
+/// block. A hunk that starts mid-file is the case that proves the two-file
+/// syntax walkers are driven from the real sources.
+#[test_case(
+    "fn a() {\n    let café = 1;\n}\n",
+    "fn a() {\n    let café = 2;\n}\n"
+    ; "single_hunk"
+)]
+#[test_case(
+    "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n",
+    "one\ntwo\nTHREE\nfour\nfive\nsix\nseven\neight\nnine\nTEN\neleven\n"
+    ; "two_hunks"
+)]
+#[test_case("", "fn new() {}\n" ; "new_file")]
+#[test_case("fn gone() {}\n", "" ; "deleted_file")]
+#[test_case("keep\nold", "keep\nnew" ; "no_trailing_newline")]
+#[test_case("// α\nlet x = 1;\n", "// α\nlet x = 2;\n" ; "unknown_extension")]
+fn lua_static_diff_body_matches_native(before: &str, after: &str) {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for theme in [
+        theme::load_by_name("dracula").expect("dracula theme"),
+        theme::load_by_name("tokyonight").expect("tokyonight theme"),
+    ] {
+        theme::set(theme);
+        for status in [ToolStatus::Success, ToolStatus::Error] {
+            for width in [24, 80, 200] {
+                let mut message =
+                    tool_message_with(status, Some("2 lines"), Some("1.2k"), Some("12:00"));
+                let path = if before.contains("α") {
+                    "notes.unknownext"
+                } else {
+                    "src/lib.rs"
+                };
+                message.tool_output = Some(Arc::new(ToolOutput::Diff {
+                    path: path.to_owned(),
+                    before: before.to_owned(),
+                    after: after.to_owned(),
+                    summary: "Changed value".to_owned(),
+                }));
+                let output_lines = maki_config::ToolOutputLines::default();
+                let rctx = crate::components::tool_display::RenderCtx {
+                    started_at: Instant::now(),
+                    width,
+                    tool_output_lines: &output_lines,
+                };
+                let native = MessagesPanel::build_tool_segment_lines(
+                    &message,
+                    status,
+                    &rctx,
+                    SectionFlags {
+                        script: false,
+                        output: true,
+                    },
+                );
+                let (native_lines, native_spinners) = settled_native(native);
+                let objects = block_objects(&message, width, None);
+                let rendered = block::render(&objects).expect("static Lua diff body");
+                assert!(rendered.tool.is_none(), "Lua must render the diff body");
+                assert_eq!(
+                    composed(rendered),
+                    with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
+                    "status={status:?} width={width} before={before:?} after={after:?}"
+                );
+                assert!(matches!(
+                    message.tool_output.as_deref(),
+                    Some(ToolOutput::Diff { before: kept, after: kept_after, .. })
+                        if kept == before && kept_after == after
+                ));
+            }
+        }
+    }
+}
+
+/// A diff keeps the host body whenever it is live or the host streamed one.
+#[test_case(ToolStatus::InProgress, false ; "in_progress")]
+#[test_case(ToolStatus::Success, true ; "streamed_body")]
+fn lua_tool_uses_native_marker_for_non_static_diff_body(status: ToolStatus, streamed: bool) {
+    crate::markdown::install_render_bridges();
+    let mut message = tool_message_with(status, None, None, None);
+    message.tool_output = Some(Arc::new(ToolOutput::Diff {
+        path: "src/lib.rs".to_owned(),
+        before: "old\n".to_owned(),
+        after: "new\n".to_owned(),
+        summary: "changed".to_owned(),
+    }));
+    if streamed {
+        message.render_snapshot = Some(rendered_snapshot());
+    }
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+    let reply = host.event_handle().request_render_block(
+        block::project_with_tool_display(&message, usize::MAX, true),
+        RenderCtx {
+            width: 80,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
+    else {
+        panic!("objects");
+    };
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    );
+}
+
+/// A theme change must recompute the host spans for a diff too, not splice the
+/// old palette back in.
+#[test]
+fn lua_diff_body_rehighlights_on_theme_switch() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let message = {
+        let mut message = tool_message_with(ToolStatus::Success, None, None, None);
+        message.tool_output = Some(Arc::new(ToolOutput::Diff {
+            path: "src/lib.rs".to_owned(),
+            before: "let café = 1;\n".to_owned(),
+            after: "let café = 2;\n".to_owned(),
+            summary: "changed".to_owned(),
+        }));
+        message
+    };
+    let body_styles = |name: &str| {
+        theme::set(theme::load_by_name(name).expect(name));
+        let objects = block_objects(&message, 80, None);
+        let rendered = block::render(&objects).expect("static Lua diff body");
+        composed(rendered)
+            .iter()
+            .skip(1)
+            .flat_map(|line| line.spans.iter().map(|span| span.style))
+            .collect::<Vec<_>>()
+    };
+
+    let dracula = body_styles("dracula");
+    let tokyonight = body_styles("tokyonight");
+
+    assert!(!dracula.is_empty());
+    assert_ne!(
+        dracula, tokyonight,
+        "the Lua diff body kept the old palette"
+    );
+}
+
 /// Every non-static code case keeps the host body: live output, collapsed
 /// sections, and truncated sections alike.
 #[test_case(ToolStatus::InProgress, usize::MAX, true ; "in_progress")]

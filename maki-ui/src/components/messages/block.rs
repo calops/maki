@@ -473,6 +473,7 @@ fn diff_projection(path: &str, before: &str, after: &str, summary: &str) -> serd
         "summary": summary,
         "mode": if before.is_empty() { "new" } else if after.is_empty() { "delete" } else { "edit" },
         "hunks": hunks,
+        "sources": { "before": before, "after": after },
     })
 }
 fn emphasis_ranges(spans: &[maki_agent::diff::DiffSpan]) -> Vec<serde_json::Value> {
@@ -969,6 +970,21 @@ mod tests {
         assert_eq!(hunk["lines"][1]["kind"], "add");
         assert_eq!(hunk["lines"][1]["new_line"], 1);
         assert!(hunk["lines"][1].get("old_line").is_none());
+    }
+
+    /// The diff bridge highlights with one parser per side, so a line's colours
+    /// depend on every line above it. The projection has to carry both full
+    /// sources, or a hunk that starts mid-file cannot be coloured like the
+    /// transcript.
+    #[test]
+    fn diff_projection_carries_the_sources_the_highlighter_walks() {
+        let before = "fn a() {\n    let x = 1;\n}\n\nfn b() {}\n";
+        let after = "fn a() {\n    let x = 2;\n}\n\nfn b() {}\n";
+        let projection = diff_projection("src/lib.rs", before, after, "changed");
+
+        assert_eq!(projection["sources"]["before"], before);
+        assert_eq!(projection["sources"]["after"], after);
+        assert!(projection.get("display").is_none());
     }
 
     #[test]

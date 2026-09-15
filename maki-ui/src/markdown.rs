@@ -328,11 +328,52 @@ pub(crate) fn transcript_code(code: serde_json::Value, _width: u16) -> Vec<Snaps
     .collect()
 }
 
+#[derive(Deserialize)]
+struct TranscriptDiff {
+    path: String,
+    summary: String,
+    sources: TranscriptDiffSources,
+}
+
+#[derive(Deserialize)]
+struct TranscriptDiffSources {
+    before: String,
+    after: String,
+}
+
+/// Temporary parity bridge for diff bodies: structural lines whose syntax and
+/// change spans are baked from the host's own renderer. Diff syntax needs the
+/// whole file on each side, because a line's parse state depends on the lines
+/// above it, so the projection ships both sources.
+pub(crate) fn transcript_diff(diff: serde_json::Value, _width: u16) -> Vec<SnapshotLine> {
+    let Ok(diff) = serde_json::from_value::<TranscriptDiff>(diff) else {
+        return Vec::new();
+    };
+    let output = ToolOutput::Diff {
+        path: diff.path,
+        before: diff.sources.before,
+        after: diff.sources.after,
+        summary: diff.summary,
+    };
+    crate::components::code_view::transcript_diff_content(
+        &output,
+        crate::components::code_view::RenderLimits {
+            script: usize::MAX,
+            output: usize::MAX,
+        },
+    )
+    .lines
+    .iter()
+    .map(snapshot_line)
+    .collect()
+}
+
 /// Installs the host bridges behind the Lua render primitives. A once-off at
 /// UI startup; headless hosts leave the slots unset.
 pub(crate) fn install_render_bridges() {
     maki_lua::set_transcript_markdown(transcript_markdown);
     maki_lua::set_transcript_code(transcript_code);
+    maki_lua::set_transcript_diff(transcript_diff);
     maki_lua::set_right_info(crate::components::tool_display::right_info_spans);
 }
 

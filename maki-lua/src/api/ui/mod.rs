@@ -170,9 +170,11 @@ fn theme_style(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
 /// The host's native transcript Markdown renderer, installed at UI startup.
 pub type TranscriptMarkdownFn = fn(&str, u16, &str, &SpanStyle, &SpanStyle) -> Vec<SnapshotLine>;
 pub type TranscriptCodeFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
+pub type TranscriptDiffFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 
 static TRANSCRIPT_MARKDOWN: OnceLock<TranscriptMarkdownFn> = OnceLock::new();
 static TRANSCRIPT_CODE: OnceLock<TranscriptCodeFn> = OnceLock::new();
+static TRANSCRIPT_DIFF: OnceLock<TranscriptDiffFn> = OnceLock::new();
 
 /// Installs the renderer behind `maki.ui.transcript_markdown`. Headless hosts
 /// leave it unset, and the primitive then answers nil.
@@ -253,6 +255,34 @@ fn transcript_code(lua: &Lua, code: Value, width: Value) -> LuaResult<Value> {
         return Ok(Value::Nil);
     };
     let lines = render(code, width);
+    let out = lua.create_table_with_capacity(lines.len(), 0)?;
+    for (i, line) in lines.iter().enumerate() {
+        out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
+    }
+    Ok(Value::Table(out))
+}
+
+/// Installs the temporary exact-parity diff renderer. It is removed once Lua
+/// diff primitives cover gutters, change spans, syntax, and truncation.
+pub fn set_transcript_diff(renderer: TranscriptDiffFn) {
+    let _ = TRANSCRIPT_DIFF.set(renderer);
+}
+
+/// Renders structured diff data exactly as the transcript, as a temporary
+/// parity bridge. Temporary: removed after Lua diff primitives reach parity,
+/// and separate from the semantic-decoration target.
+///
+/// @param diff table Structured `block.tool.diff` source data.
+/// @param width integer Wrap width in display cells, > 0.
+/// @return (table|nil) Lines, or nil when unavailable.
+#[lua_fn]
+fn transcript_diff(lua: &Lua, diff: Value, width: Value) -> LuaResult<Value> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let diff = lua.from_value(diff)?;
+    let Some(render) = TRANSCRIPT_DIFF.get() else {
+        return Ok(Value::Nil);
+    };
+    let lines = render(diff, width);
     let out = lua.create_table_with_capacity(lines.len(), 0)?;
     for (i, line) in lines.iter().enumerate() {
         out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
@@ -944,7 +974,7 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_tool, spinner, todo_marker, right_info,
+        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_tool, spinner, todo_marker, right_info,
         highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,

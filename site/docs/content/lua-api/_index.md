@@ -5044,6 +5044,25 @@ primitives reach parity, and separate from the semantic-decoration target.
 
 ---
 
+### `maki.ui.transcript_diff()` {#maki-ui-transcript_diff}
+
+```lua
+maki.ui.transcript_diff({diff}, {width})
+```
+
+Renders structured diff data exactly as the transcript, as a temporary
+parity bridge. Temporary: removed after Lua diff primitives reach parity,
+and separate from the semantic-decoration target.
+
+**Parameters:**
+
+- `{diff}` (`table`) Structured `block.tool.diff` source data.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
+
+**Returns:** (`table|nil`) Lines, or nil when unavailable.
+
+---
+
 ### `maki.ui.transcript_tool()` {#maki-ui-transcript_tool}
 
 ```lua

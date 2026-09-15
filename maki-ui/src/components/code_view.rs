@@ -465,6 +465,14 @@ pub fn transcript_code_content(
     render_tool_content(input, output, true, limits)
 }
 
+/// The host side of `maki.ui.transcript_diff`. Temporary parity bridge: it
+/// runs the same Syntect pipeline the highlight worker uses and hands back the
+/// settled lines, with the concrete styles taken from the active Rust theme.
+/// It is not the semantic-decoration target.
+pub fn transcript_diff_content(output: &ToolOutput, limits: RenderLimits) -> ToolContent {
+    render_tool_content(None, Some(output), true, limits)
+}
+
 pub fn render_tool_content(
     input: Option<&ToolInput>,
     output: Option<&ToolOutput>,

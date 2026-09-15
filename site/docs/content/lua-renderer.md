@@ -46,6 +46,7 @@ block.tool.diff = {
   path = "src/lib.rs",
   summary = "Updated src/lib.rs",
   mode = "edit", -- "edit", "new", or "delete"
+  sources = { before = "file text", after = "file text" },
   hunks = {
     {
       old_start = 4, old_count = 2,
@@ -62,7 +63,9 @@ block.tool.diff = {
 }
 ```
 
-Hunk starts and line numbers are 1-based. An empty old or new hunk side has start `0` and count `0`. `text` has no trailing newline. `no_newline_at_eof` represents the source EOF state. `emphasis` ranges are half-open UTF-8 byte columns into `text`. They belong to the old side for `remove` and the new side for `add`. Context lines have both line numbers and no emphasis.
+Hunk starts and line numbers are 1-based. An empty old or new hunk side has start `0` and count `0`. `text` has no trailing newline. `no_newline_at_eof` represents the source EOF state, which the current renderer does not draw. `sources` holds both files unchanged, because syntax state at a hunk depends on every line above it.
+
+Bodies are drawn by `maki.ui.transcript_diff`, a temporary host bridge that returns structural lines with syntax and change spans computed from the active theme. A diff body is never truncated, so its only eligibility condition is a settled tool with no host-owned streamed body. `emphasis` ranges are half-open UTF-8 byte columns into `text`. They belong to the old side for `remove` and the new side for `add`. Context lines have both line numbers and no emphasis.
 
 ### Grep
 
