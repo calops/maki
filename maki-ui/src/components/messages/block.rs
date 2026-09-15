@@ -190,6 +190,7 @@ fn tool_block(
         }
     }
     tool.insert("header".into(), header);
+    tool.insert("body_authority".into(), body_authority(message).into());
     if let Some(code) = code_projection(message, output_limit, expanded) {
         tool.insert("code".into(), code);
     }
@@ -213,6 +214,19 @@ fn tool_block(
         }
     }
     serde_json::Value::Object(tool)
+}
+
+/// Who owns the tool body. A streamed plugin body outranks anything Lua can
+/// compose from the projection, so Lua must keep the native marker whenever
+/// the host holds one.
+fn body_authority(message: &DisplayMessage) -> &'static str {
+    if message.render_snapshot.is_some() {
+        "snapshot"
+    } else if message.live_output.is_some() {
+        "live"
+    } else {
+        "none"
+    }
 }
 
 fn code_projection(
@@ -776,7 +790,7 @@ mod tests {
         components::{IMAGE_PLACEHOLDER, ToolRole, ToolStatus},
         theme,
     };
-    use maki_agent::SnapshotLine;
+    use maki_agent::{BufferSnapshot, SnapshotLine};
     use maki_providers::{ImageMediaType, ImageSource};
     use std::sync::Arc;
     use test_case::test_case;
@@ -810,6 +824,26 @@ mod tests {
         assert_eq!(images[0]["media_type"], ImageMediaType::Png.mime());
         assert_eq!(images[0]["bytes"], PNG_PAYLOAD.len());
         assert!(!block.to_string().contains(PNG_PAYLOAD));
+    }
+
+    #[test]
+    fn body_authority_names_the_host_body_owner() {
+        let mut message = DisplayMessage::new(
+            DisplayRole::Tool(Box::new(ToolRole {
+                id: "t".to_owned(),
+                status: ToolStatus::Success,
+                name: Arc::from("bash"),
+            })),
+            "bash> cmd".to_owned(),
+        );
+        let authority = |message: &DisplayMessage| {
+            project_with_tool_display(message, 0, false)["tool"]["body_authority"].clone()
+        };
+        assert_eq!(authority(&message), "none");
+        message.live_output = Some("streaming".to_owned());
+        assert_eq!(authority(&message), "live");
+        message.render_snapshot = Some(BufferSnapshot::plain_text("streamed".into()));
+        assert_eq!(authority(&message), "snapshot");
     }
 
     #[test]

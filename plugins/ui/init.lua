@@ -20,6 +20,7 @@ local TOOL_HEADER_STYLE = "tool"
 local TOOL_ANNOTATION_STYLE = "tool_annotation"
 local STATUS_IN_PROGRESS = "in_progress"
 local HEADER_SNAPSHOT = "snapshot"
+local BODY_NONE = "none"
 local RESPONSES = {
   assistant = { prefix = "maki> ", prefix_style = "assistant_prefix", text_style = "assistant" },
   user = { prefix = "you> ", prefix_style = "user", text_style = "assistant" },
@@ -219,9 +220,16 @@ local function tool_lines(block, ctx)
   if tool.timestamp then
     maki.ui.right_info(spans, tool.usage, tool.timestamp, ctx.width)
   end
-  local body, has_code = tool_code(tool.code, tool.status, ctx)
-  if not has_code then
-    body = tool_body(tool.body, ctx)
+  -- A host-owned streamed body wins over anything composed here, so it keeps
+  -- the native marker. Authority changes rebuild the block, which re-runs this.
+  local authority = tool.body_authority
+  local body
+  if authority == nil or authority == BODY_NONE then
+    local has_code
+    body, has_code = tool_code(tool.code, tool.status, ctx)
+    if not has_code then
+      body = tool_body(tool.body, ctx)
+    end
   end
   if not body then
     return { spans, maki.ui.transcript_tool() }

@@ -9,6 +9,10 @@ weight: 80
 
 A tool block may include `block.tool.diff` or `block.tool.grep`. They contain source data for a Lua renderer. They are separate from the temporary native tool-body marker.
 
+### Body authority
+
+`block.tool.body_authority` is `"none"`, `"snapshot"`, or `"live"`. A plugin that streamed a body keeps it: the host body is authoritative, and a renderer must keep `maki.ui.transcript_tool()` whenever the value is not `"none"`. Composing a body from the projection would drop the streamed one.
+
 ### Plain tool bodies
 
 `block.tool.body` is present for plain, Markdown, directory, todo, and legacy batch output. Unsupported and interactive collapsed bodies use the native tool marker until action dispatch is available.

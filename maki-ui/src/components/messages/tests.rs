@@ -3494,6 +3494,85 @@ fn lua_code_body_keeps_native_text_and_gutters() {
     );
 }
 
+/// A body the host streamed outranks any static projection: the renderer has
+/// to keep the native marker while the host holds one, and compose again once
+/// the host body is gone.
+#[test_case(ToolOutput::Plain("one\ntwo".into()), None ; "plain")]
+#[test_case(ToolOutput::Markdown("one\n\ntwo".into()), None ; "markdown")]
+#[test_case(
+    ToolOutput::ReadCode {
+        path: "src/lib.rs".into(),
+        start_line: 1,
+        lines: vec!["one".into(), "two".into()],
+        total_lines: 2,
+        instructions: None,
+    },
+    Some(ToolInput::Code { language: "rust".into(), code: "fn x() {}".into() })
+    ; "code"
+)]
+fn lua_static_body_defers_to_a_streamed_host_body(output: ToolOutput, input: Option<ToolInput>) {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    theme::set(theme::load_by_name("dracula").expect("dracula theme"));
+    let message = |snapshot: Option<BufferSnapshot>| {
+        let mut message = tool_message();
+        message.tool_input = input.clone().map(Arc::new);
+        message.tool_output = Some(Arc::new(output.clone()));
+        message.render_snapshot = snapshot;
+        message
+    };
+    let has_marker = |message: &DisplayMessage| {
+        let objects = block_objects(message, 80, None);
+        (
+            objects
+                .iter()
+                .any(|object| matches!(object, maki_lua::RenderObject::ToolBody)),
+            objects,
+        )
+    };
+
+    let (marker, objects) = has_marker(&message(None));
+    assert!(
+        !marker,
+        "a static eligible body must render in Lua: {objects:?}"
+    );
+    let snapshot = BufferSnapshot::plain_text("streamed body".into());
+    let (marker, objects) = has_marker(&message(Some(snapshot)));
+    assert!(
+        marker,
+        "a streamed host body must keep the native marker: {objects:?}"
+    );
+    let (marker, objects) = has_marker(&message(None));
+    assert!(
+        !marker,
+        "clearing the host body must hand the block back to Lua: {objects:?}"
+    );
+}
+
+/// Authority can only change through a Rust rebuild, and every rebuild bumps
+/// the segment revision, which is what makes the next tick re-request the
+/// renderer with the new projection.
+#[test]
+fn a_streamed_body_bumps_the_block_revision() {
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.tool_done(done("t1"));
+    render(&mut panel, 80, 20);
+    let revision = |panel: &MessagesPanel| {
+        panel
+            .cache
+            .segments()
+            .iter()
+            .find(|s| s.tool_id.as_deref() == Some("t1"))
+            .expect("tool segment")
+            .revision()
+    };
+    let before = revision(&panel);
+
+    panel.tool_snapshot("t1", rendered_snapshot(), None);
+
+    assert!(revision(&panel) > before, "a streamed body must re-render");
+}
+
 /// Every non-static code case keeps the host body: live output, collapsed
 /// sections, and truncated sections alike.
 #[test_case(ToolStatus::InProgress, usize::MAX, true ; "in_progress")]
