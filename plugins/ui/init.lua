@@ -112,7 +112,21 @@ local function tool_body(body)
     return nil
   end
   if body.kind == "todo_list" then
-    return nil
+    if body.empty then
+      return { { { "  ", {} }, { body.empty.label, body.empty.group } } }
+    end
+    local lines = {}
+    for _, item in ipairs(body.items or {}) do
+      local spans = {
+        { "  ", {} },
+        maki.ui.todo_marker(item.marker),
+        { " ", {} },
+        { item.content, "todo." .. item.status },
+        { " (" .. item.priority .. ")", "todo.priority." .. item.priority },
+      }
+      lines[#lines + 1] = spans
+    end
+    return lines
   end
   if body.kind ~= "plain" and body.kind ~= "read_dir" and body.kind ~= "batch" then
     return nil

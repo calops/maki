@@ -3281,25 +3281,115 @@ fn native_empty_todo_body_uses_semantic_empty_style() {
 }
 
 #[test]
-fn lua_tool_uses_native_marker_for_truncated_todo_body() {
+fn lua_static_todo_body_matches_native() {
+    const CUSTOM_THEME: &str = r##"
+[ui.todo_completed]
+fg = "#00ff00"
+
+[ui.todo_in_progress]
+fg = "#ffff00"
+
+[ui.todo_pending]
+fg = "#00ffff"
+
+[ui.todo_cancelled]
+fg = "#ff0000"
+"##;
+    let todos = vec![
+        maki_agent::types::TodoItem {
+            content: "pending".to_owned(),
+            status: maki_agent::types::TodoStatus::Pending,
+            priority: maki_agent::types::TodoPriority::Medium,
+        },
+        maki_agent::types::TodoItem {
+            content: "in progress".to_owned(),
+            status: maki_agent::types::TodoStatus::InProgress,
+            priority: maki_agent::types::TodoPriority::Low,
+        },
+        maki_agent::types::TodoItem {
+            content: "café".to_owned(),
+            status: maki_agent::types::TodoStatus::Completed,
+            priority: maki_agent::types::TodoPriority::High,
+        },
+        maki_agent::types::TodoItem {
+            content: "cancelled".to_owned(),
+            status: maki_agent::types::TodoStatus::Cancelled,
+            priority: maki_agent::types::TodoPriority::Medium,
+        },
+    ];
+    for theme in [
+        theme::load_by_name("dracula").expect("dracula theme"),
+        theme::Theme::from_toml(CUSTOM_THEME).expect("custom theme"),
+    ] {
+        theme::set(theme);
+        for output in [
+            ToolOutput::TodoList(Vec::new()),
+            ToolOutput::TodoList(todos.clone()),
+        ] {
+            for status in [
+                ToolStatus::InProgress,
+                ToolStatus::Success,
+                ToolStatus::Error,
+            ] {
+                for width in [24, 80, 200] {
+                    let mut message =
+                        tool_message_with(status, Some("4 todos"), Some("1.2k"), Some("12:00"));
+                    message.tool_output = Some(Arc::new(output.clone()));
+                    let output_lines = maki_config::ToolOutputLines::default();
+                    let rctx = crate::components::tool_display::RenderCtx {
+                        started_at: Instant::now(),
+                        width,
+                        tool_output_lines: &output_lines,
+                    };
+                    let native = MessagesPanel::build_tool_segment_lines(
+                        &message,
+                        status,
+                        &rctx,
+                        SectionFlags {
+                            script: false,
+                            output: true,
+                        },
+                    );
+                    let objects = block_objects(&message, width, None);
+                    let rendered = block::render(&objects).expect("Lua body");
+                    assert!(rendered.tool.is_none());
+                    assert_eq!(
+                        composed(rendered),
+                        with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+                        "status={status:?} width={width}"
+                    );
+                    assert!(matches!(
+                        message.tool_output.as_deref(),
+                        Some(ToolOutput::TodoList(items)) if *items == todos || items.is_empty()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lua_tool_uses_native_marker_for_collapsed_todo_body() {
     let mut message = tool_message();
-    message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![])));
-    let objects = {
-        const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-        let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
-        let reply = host.event_handle().request_render_block(
-            block::project_with_tool_display(&message, 1, false),
-            RenderCtx {
-                width: 80,
-                mode: Arc::from("build"),
-                theme_gen: theme::generation(),
-            },
-        );
-        let BlockRender::Objects(objects) = reply.recv_timeout(REPLY_TIMEOUT).expect("reply")
-        else {
-            panic!("objects");
-        };
-        objects
+    message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![
+        maki_agent::types::TodoItem {
+            content: "todo".to_owned(),
+            status: maki_agent::types::TodoStatus::Pending,
+            priority: maki_agent::types::TodoPriority::Medium,
+        },
+    ])));
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+    let reply = host.event_handle().request_render_block(
+        block::project_with_tool_display(&message, usize::MAX, false),
+        RenderCtx {
+            width: 80,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
+    else {
+        panic!("objects");
     };
     assert!(
         objects
