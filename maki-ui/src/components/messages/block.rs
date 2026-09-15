@@ -204,6 +204,7 @@ fn tool_body_projection(
 ) -> Option<serde_json::Value> {
     let (kind, text, legacy) = match output {
         ToolOutput::Plain(text) => ("plain", text.text.as_str(), false),
+        ToolOutput::Markdown(text) => ("markdown", text.text.as_str(), false),
         ToolOutput::ReadDir(text) => ("read_dir", text.text.as_str(), false),
         ToolOutput::Batch { text } => ("batch", text.as_str(), true),
         ToolOutput::TodoList(items) => {
@@ -743,8 +744,10 @@ mod tests {
         assert_eq!(body["empty"]["group"], "todo.empty");
     }
 
-    #[test]
-    fn plain_body_projection_keeps_source_and_display_state() {
+    #[test_case(ToolOutput::Plain("one\ntwo\nthree".into()), "plain" ; "plain")]
+    #[test_case(ToolOutput::Markdown("one\ntwo\nthree".into()), "markdown" ; "markdown")]
+    fn text_body_projection_keeps_source_and_display_state(output: ToolOutput, kind: &str) {
+        let text = output.as_text();
         let mut message = DisplayMessage::new(
             DisplayRole::Tool(Box::new(ToolRole {
                 id: "t".to_owned(),
@@ -753,11 +756,11 @@ mod tests {
             })),
             "bash> cmd".to_owned(),
         );
-        message.tool_output = Some(Arc::new(ToolOutput::Plain("one\ntwo\nthree".into())));
+        message.tool_output = Some(Arc::new(output));
         let block = project_with_tool_display(&message, 2, false);
         let body = &block["tool"]["body"];
-        assert_eq!(body["kind"], "plain");
-        assert_eq!(body["text"], "one\ntwo\nthree");
+        assert_eq!(body["kind"], kind);
+        assert_eq!(body["text"], text);
         assert_eq!(body["display"]["limit"]["configured"], 2);
         assert_eq!(body["display"]["limit"]["visible_lines"], 2);
         assert_eq!(body["display"]["truncation"]["tail_hidden"], 1);

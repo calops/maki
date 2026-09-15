@@ -11,11 +11,11 @@ A tool block may include `block.tool.diff` or `block.tool.grep`. They contain so
 
 ### Plain tool bodies
 
-`block.tool.body` is present for plain, directory, todo, and legacy batch output. Unsupported and interactive collapsed bodies use the native tool marker until action dispatch is available.
+`block.tool.body` is present for plain, Markdown, directory, todo, and legacy batch output. Unsupported and interactive collapsed bodies use the native tool marker until action dispatch is available.
 
 ```lua
 block.tool.body = {
-  kind = "plain", -- "plain", "read_dir", "batch", or "todo_list"
+  kind = "plain", -- "plain", "markdown", "read_dir", "batch", or "todo_list"
   text = "raw source output", -- text bodies
   legacy = true, -- batch only
   display = {
