@@ -1,10 +1,12 @@
 use std::borrow::Cow;
 
+use serde::Deserialize;
+
 use crate::components::tool_display::resolve_span_style;
 use crate::theme;
 use crate::theme::Theme;
 use maki_agent::types::{DefaultColor, InlineStyle};
-use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle};
+use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle, ToolInput, ToolOutput};
 use maki_highlight::SegmentColor;
 use maki_markdown::Emphasis;
 use maki_markdown::render::{self, Line as RLine, LineKind, Span as RSpan, StyleToken};
@@ -270,10 +272,67 @@ pub(crate) fn transcript_markdown(
     .collect()
 }
 
+#[derive(Deserialize)]
+struct TranscriptCode {
+    input: Option<TranscriptCodeInput>,
+    output: Option<TranscriptCodeOutput>,
+}
+
+#[derive(Deserialize)]
+struct TranscriptCodeInput {
+    language: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct TranscriptCodeOutput {
+    kind: String,
+    path: String,
+    start_line: usize,
+    lines: Vec<String>,
+    total_lines: usize,
+}
+
+/// Temporary parity bridge for code bodies: structural lines whose syntax
+/// spans are baked from the host's own highlighter. Lua chooses placement
+/// only. A theme change bumps the render key, so the host recomputes these
+/// spans instead of Lua re-resolving styles.
+pub(crate) fn transcript_code(code: serde_json::Value, _width: u16) -> Vec<SnapshotLine> {
+    let Ok(code) = serde_json::from_value::<TranscriptCode>(code) else {
+        return Vec::new();
+    };
+    let input = code.input.map(|input| ToolInput::Code {
+        language: input.language,
+        code: input.code,
+    });
+    let output = code.output.and_then(|output| {
+        (output.kind == "read_code").then_some(ToolOutput::ReadCode {
+            path: output.path,
+            start_line: output.start_line,
+            lines: output.lines,
+            total_lines: output.total_lines,
+            instructions: None,
+        })
+    });
+    crate::components::code_view::transcript_code_content(
+        input.as_ref(),
+        output.as_ref(),
+        crate::components::code_view::RenderLimits {
+            script: usize::MAX,
+            output: usize::MAX,
+        },
+    )
+    .lines
+    .iter()
+    .map(snapshot_line)
+    .collect()
+}
+
 /// Installs the host bridges behind the Lua render primitives. A once-off at
 /// UI startup; headless hosts leave the slots unset.
 pub(crate) fn install_render_bridges() {
     maki_lua::set_transcript_markdown(transcript_markdown);
+    maki_lua::set_transcript_code(transcript_code);
     maki_lua::set_right_info(crate::components::tool_display::right_info_spans);
 }
 

@@ -2,6 +2,7 @@ use super::segment;
 use super::*;
 use crate::chat::{DONE_TEXT, ERROR_TEXT};
 use crate::components::scrollbar::SCROLLBAR_THUMB;
+use crate::render_worker::RenderWorker;
 use crate::repaint::expect::{OWED, QUIET};
 use crate::selection::{DocPos, Selection, SelectionZone};
 use maki_agent::tools::{BASH_TOOL_NAME, GREP_TOOL_NAME, ToolRegistry, WRITE_TOOL_NAME};
@@ -3220,7 +3221,7 @@ fn lua_static_text_body_matches_native(output: ToolOutput) {
 #[test_case("# Heading\n\n- **bold** item\n  - nested\n\n1. ordered\n2. ordered two" ; "headings_and_lists")]
 #[test_case("> quote with *emphasis* and `code`\n\n```rust\nfn café() {}\n```" ; "quote_and_code")]
 fn lua_static_markdown_body_matches_native(text: &str) {
-    let _theme_lock = THEME_LOCK.lock().expect("theme lock");
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     const CUSTOM_THEME: &str = r##"
 [ui.assistant]
 fg = "#00ff00"
@@ -3275,11 +3276,261 @@ fg = "#ff00ff"
     }
 }
 
+const CODE_SAMPLE: &str = "fn café() {}";
+const READ_CODE_LINES: [&str; 2] = ["pub fn café() {}", "// done"];
+
+fn code_message(status: ToolStatus) -> DisplayMessage {
+    let mut message = tool_message_with(status, Some("2 lines"), Some("1.2k"), Some("12:00"));
+    message.tool_input = Some(Arc::new(ToolInput::Code {
+        language: "rust".to_owned(),
+        code: format!("{CODE_SAMPLE}\n"),
+    }));
+    message.tool_output = Some(Arc::new(ToolOutput::ReadCode {
+        path: "src/lib.rs".to_owned(),
+        start_line: 10,
+        lines: READ_CODE_LINES
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect(),
+        total_lines: 11,
+        instructions: None,
+    }));
+    message
+}
+
+/// The native block with the host's syntax pass settled, which is what the
+/// transcript draws once the highlight worker answers.
+fn settled_native(
+    tl: crate::components::tool_display::ToolLines,
+) -> (
+    Vec<Line<'static>>,
+    Vec<crate::components::tool_display::SpinnerLine>,
+) {
+    let spinners = tl.spinner_lines.clone();
+    let has_highlight = tl.highlight.is_some();
+    let worker = RenderWorker::new();
+    let mut seg = segment::Segment::with_tool("t1".to_owned());
+    seg.apply_highlight(tl, &worker);
+    if !has_highlight {
+        return (seg.lines().to_vec(), spinners);
+    }
+    let deadline = Instant::now() + HIGHLIGHT_DEADLINE;
+    loop {
+        if let Some(result) = worker.try_recv() {
+            seg.apply_highlight_result(result.lines);
+            return (seg.lines().to_vec(), spinners);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the highlight worker never delivered a code result"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn lua_code_body(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
+    let objects = block_objects(message, width, None);
+    let rendered =
+        block::render(&objects).unwrap_or_else(|| panic!("static Lua code body: {objects:?}"));
+    assert!(rendered.tool.is_none(), "Lua must render the code body");
+    composed(rendered)
+}
+
+#[test]
+fn lua_static_code_and_read_body_matches_native() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for theme in [
+        theme::load_by_name("dracula").expect("dracula theme"),
+        theme::load_by_name("tokyonight").expect("tokyonight theme"),
+    ] {
+        theme::set(theme);
+        for status in [ToolStatus::Success, ToolStatus::Error] {
+            for width in [24, 80, 200] {
+                let message = code_message(status);
+                let output_lines = maki_config::ToolOutputLines::default();
+                let rctx = crate::components::tool_display::RenderCtx {
+                    started_at: Instant::now(),
+                    width,
+                    tool_output_lines: &output_lines,
+                };
+                let native = MessagesPanel::build_tool_segment_lines(
+                    &message,
+                    status,
+                    &rctx,
+                    SectionFlags {
+                        script: true,
+                        output: true,
+                    },
+                );
+                let (native_lines, native_spinners) = settled_native(native);
+                assert_eq!(
+                    lua_code_body(&message, width),
+                    with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
+                    "status={status:?} width={width}"
+                );
+                assert!(matches!(
+                    message.tool_input.as_deref(),
+                    Some(ToolInput::Code { code, .. }) if code == "fn café() {}\n"
+                ));
+            }
+        }
+    }
+}
+
+/// Input-only scripts render through the same bridge, including a language
+/// with no syntax, where the native fallback span decides the style.
+#[test_case("rust", "fn café() {}" ; "known_language")]
+#[test_case("notalanguage", "plain text" ; "unknown_language")]
+fn lua_static_code_input_matches_native(language: &str, code: &str) {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    theme::set(theme::load_by_name("dracula").expect("dracula theme"));
+    let mut message = tool_message_with(ToolStatus::Success, None, None, Some("12:00"));
+    message.text = "list files".to_owned();
+    message.tool_input = Some(Arc::new(ToolInput::Code {
+        language: language.to_owned(),
+        code: code.to_owned(),
+    }));
+    message.tool_output = None;
+    let output_lines = maki_config::ToolOutputLines::default();
+    let rctx = crate::components::tool_display::RenderCtx {
+        started_at: Instant::now(),
+        width: 80,
+        tool_output_lines: &output_lines,
+    };
+    let native = MessagesPanel::build_tool_segment_lines(
+        &message,
+        ToolStatus::Success,
+        &rctx,
+        SectionFlags {
+            script: true,
+            output: true,
+        },
+    );
+    let (native_lines, native_spinners) = settled_native(native);
+
+    assert_eq!(
+        lua_code_body(&message, 80),
+        with_spinners(native_lines, &native_spinners, TOOL_GLYPH)
+    );
+    assert!(matches!(
+        message.tool_input.as_deref(),
+        Some(ToolInput::Code { code: kept, .. }) if kept == code
+    ));
+}
+
+/// A theme change must recompute the host spans, not splice the old palette
+/// back into the Lua body.
+#[test]
+fn lua_code_body_rehighlights_on_theme_switch() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let message = code_message(ToolStatus::Success);
+    let body_styles = |name: &str| {
+        theme::set(theme::load_by_name(name).expect(name));
+        lua_code_body(&message, 80)
+            .iter()
+            .skip(1)
+            .flat_map(|line| line.spans.iter().map(|span| span.style))
+            .collect::<Vec<_>>()
+    };
+
+    let dracula = body_styles("dracula");
+    let tokyonight = body_styles("tokyonight");
+
+    assert!(!dracula.is_empty());
+    assert_ne!(
+        dracula, tokyonight,
+        "the Lua code body kept the old palette"
+    );
+}
+
+/// The bridge must not change code text, gutter numbers, or wrapping: only
+/// the syntax colors come from the host.
+#[test]
+fn lua_code_body_keeps_native_text_and_gutters() {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    theme::set(theme::load_by_name("dracula").expect("dracula theme"));
+    let message = code_message(ToolStatus::Success);
+    let output_lines = maki_config::ToolOutputLines::default();
+    let rctx = crate::components::tool_display::RenderCtx {
+        started_at: Instant::now(),
+        width: 80,
+        tool_output_lines: &output_lines,
+    };
+    let native = MessagesPanel::build_tool_segment_lines(
+        &message,
+        ToolStatus::Success,
+        &rctx,
+        SectionFlags {
+            script: true,
+            output: true,
+        },
+    );
+    let (native_lines, _) = settled_native(native);
+    let lua = lua_code_body(&message, 80);
+
+    let text = |lines: &[Line<'static>]| {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(text(&lua), text(&native_lines));
+    assert!(
+        lua.iter().any(|line| line.spans[0].content == "  "),
+        "the body indent must survive"
+    );
+    assert!(
+        lua.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.starts_with("10 "))
+        }),
+        "the read gutter must start at the source line number"
+    );
+}
+
+/// Every non-static code case keeps the host body: live output, collapsed
+/// sections, and truncated sections alike.
+#[test_case(ToolStatus::InProgress, usize::MAX, true ; "in_progress")]
+#[test_case(ToolStatus::Success, usize::MAX, false ; "collapsed")]
+#[test_case(ToolStatus::Success, 1, false ; "truncated")]
+fn lua_tool_uses_native_marker_for_non_static_code_body(
+    status: ToolStatus,
+    limit: usize,
+    expanded: bool,
+) {
+    crate::markdown::install_render_bridges();
+    let message = code_message(status);
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+    let reply = host.event_handle().request_render_block(
+        block::project_with_tool_display(&message, limit, expanded),
+        RenderCtx {
+            width: 80,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
+    else {
+        panic!("objects");
+    };
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::ToolBody))
+    );
+}
+
 #[test_case(usize::MAX, false ; "collapsed")]
 #[test_case(1, false ; "truncated")]
 fn lua_tool_uses_native_marker_for_non_static_markdown_body(limit: usize, expanded: bool) {
-    let mut message = tool_message();
-    message.tool_output = Some(Arc::new(ToolOutput::Markdown("one\ntwo".into())));
+    crate::markdown::install_render_bridges();
+    let message = tool_message();
     let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
     let reply = host.event_handle().request_render_block(
         block::project_with_tool_display(&message, limit, expanded),
@@ -3302,8 +3553,8 @@ fn lua_tool_uses_native_marker_for_non_static_markdown_body(limit: usize, expand
 
 #[test]
 fn lua_tool_uses_native_marker_for_collapsed_plain_body() {
-    let mut message = tool_message();
-    message.tool_output = Some(Arc::new(ToolOutput::Plain("one\ntwo".into())));
+    crate::markdown::install_render_bridges();
+    let message = tool_message();
     let objects = {
         const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
         let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
@@ -3413,11 +3664,7 @@ fg = "#ff0000"
             ToolOutput::TodoList(Vec::new()),
             ToolOutput::TodoList(todos.clone()),
         ] {
-            for status in [
-                ToolStatus::InProgress,
-                ToolStatus::Success,
-                ToolStatus::Error,
-            ] {
+            for status in [ToolStatus::Success, ToolStatus::Error] {
                 for width in [24, 80, 200] {
                     let mut message =
                         tool_message_with(status, Some("4 todos"), Some("1.2k"), Some("12:00"));
@@ -3457,6 +3704,7 @@ fg = "#ff0000"
 
 #[test]
 fn lua_tool_uses_native_marker_for_collapsed_todo_body() {
+    crate::markdown::install_render_bridges();
     let mut message = tool_message();
     message.tool_output = Some(Arc::new(ToolOutput::TodoList(vec![
         maki_agent::types::TodoItem {

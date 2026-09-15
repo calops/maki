@@ -453,6 +453,18 @@ pub struct ToolContent {
     pub truncation: SectionFlags,
 }
 
+/// The host side of `maki.ui.transcript_code`. Temporary parity bridge: it
+/// runs the same Syntect pipeline the highlight worker uses and hands back the
+/// settled lines, with the concrete styles taken from the active Rust theme.
+/// It is not the semantic-decoration target; Tree-sitter ranges replace it.
+pub fn transcript_code_content(
+    input: Option<&ToolInput>,
+    output: Option<&ToolOutput>,
+    limits: RenderLimits,
+) -> ToolContent {
+    render_tool_content(input, output, true, limits)
+}
+
 pub fn render_tool_content(
     input: Option<&ToolInput>,
     output: Option<&ToolOutput>,

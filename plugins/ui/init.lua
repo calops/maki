@@ -100,9 +100,36 @@ local function tool_indicator(status)
   return { TOOL_INDICATOR, status == ERROR and "tool_error" or SUCCESS_STYLE }
 end
 
--- The tool header plus the host's body, with the indicator, prefix, header
--- text (or snapshot spans), annotation and right-info drawn natively. Returns
--- nil when the block carries no structured header, so the caller falls back.
+-- Static code input and read output, drawn by the host's temporary parity
+-- bridge. Anything live, collapsed, or truncated keeps the native body.
+local function tool_code(code, status, ctx)
+  if not code then
+    return nil, false
+  end
+  if status == STATUS_IN_PROGRESS then
+    return nil, true
+  end
+  local input = code.input
+  local output = code.output
+  if input and not (input.display.expanded and not input.display.truncation) then
+    return nil, true
+  end
+  if output and not (output.display.expanded and not output.display.truncation) then
+    return nil, true
+  end
+  local lines = maki.ui.transcript_code(code, ctx.width - 2)
+  if not lines then
+    return nil, true
+  end
+  for _, line in ipairs(lines) do
+    table.insert(line, 1, { "  ", {} })
+  end
+  return lines, true
+end
+
+-- The host's body for the kinds Lua renders itself. Returns nil when the
+-- body is not a static, expanded, untruncated one, so the caller can fall
+-- back to the native marker.
 local function tool_body(body, ctx)
   if not body then
     return nil
@@ -161,6 +188,8 @@ local function tool_body(body, ctx)
   return lines
 end
 
+-- The tool header plus the body, with the indicator, prefix, header text
+-- (or snapshot spans), annotation and right-info drawn natively.
 local function tool_lines(block, ctx)
   local tool = block.tool
   local header = tool and tool.header
@@ -190,7 +219,10 @@ local function tool_lines(block, ctx)
   if tool.timestamp then
     maki.ui.right_info(spans, tool.usage, tool.timestamp, ctx.width)
   end
-  local body = tool_body(tool.body, ctx)
+  local body, has_code = tool_code(tool.code, tool.status, ctx)
+  if not has_code then
+    body = tool_body(tool.body, ctx)
+  end
   if not body then
     return { spans, maki.ui.transcript_tool() }
   end

@@ -7,7 +7,7 @@ use humantime::format_duration;
 use maki_agent::{SnapshotLine, SnapshotSpan, SpanStyle};
 use maki_highlight::{DEFAULT_COLOR_NAME, SegmentColor};
 use maki_lua_macro::{lua_fn, lua_table};
-use mlua::{Lua, Result as LuaResult, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
 use strum::VariantNames;
 use unicode_width::UnicodeWidthStr;
 
@@ -169,8 +169,10 @@ fn theme_style(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
 
 /// The host's native transcript Markdown renderer, installed at UI startup.
 pub type TranscriptMarkdownFn = fn(&str, u16, &str, &SpanStyle, &SpanStyle) -> Vec<SnapshotLine>;
+pub type TranscriptCodeFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 
 static TRANSCRIPT_MARKDOWN: OnceLock<TranscriptMarkdownFn> = OnceLock::new();
+static TRANSCRIPT_CODE: OnceLock<TranscriptCodeFn> = OnceLock::new();
 
 /// Installs the renderer behind `maki.ui.transcript_markdown`. Headless hosts
 /// leave it unset, and the primitive then answers nil.
@@ -222,6 +224,35 @@ fn transcript_markdown(
         return Ok(Value::Nil);
     };
     let lines = render(&text, width, &prefix, &text_style, &prefix_style);
+    let out = lua.create_table_with_capacity(lines.len(), 0)?;
+    for (i, line) in lines.iter().enumerate() {
+        out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
+    }
+    Ok(Value::Table(out))
+}
+
+/// Installs the temporary exact-parity code renderer. It is removed once Lua
+/// code-view primitives cover gutters and syntax, and does not replace the
+/// semantic-decoration target.
+pub fn set_transcript_code(renderer: TranscriptCodeFn) {
+    let _ = TRANSCRIPT_CODE.set(renderer);
+}
+
+/// Renders structured code input and read output exactly as the transcript,
+/// as a temporary parity bridge. Temporary: removed after Lua code-view
+/// primitives reach parity, and separate from the semantic-decoration target.
+///
+/// @param code table Structured `block.tool.code` source data.
+/// @param width integer Wrap width in display cells, > 0.
+/// @return (table|nil) Lines, or nil when unavailable.
+#[lua_fn]
+fn transcript_code(lua: &Lua, code: Value, width: Value) -> LuaResult<Value> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let code = lua.from_value(code)?;
+    let Some(render) = TRANSCRIPT_CODE.get() else {
+        return Ok(Value::Nil);
+    };
+    let lines = render(code, width);
     let out = lua.create_table_with_capacity(lines.len(), 0)?;
     for (i, line) in lines.iter().enumerate() {
         out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
@@ -913,7 +944,7 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_tool, spinner, todo_marker, right_info,
+        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_tool, spinner, todo_marker, right_info,
         highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,

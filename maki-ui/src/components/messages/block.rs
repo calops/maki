@@ -265,6 +265,11 @@ fn code_projection(
     if input.is_none() && output.is_none() {
         return None;
     }
+    // A static read is the only output this slice covers; anything else
+    // (writes, diffs) keeps the native body until its own migration.
+    if message.tool_output.is_some() && output.is_none() {
+        return None;
+    }
     Some(serde_json::json!({ "input": input, "output": output }))
 }
 

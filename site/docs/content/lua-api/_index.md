@@ -5025,6 +5025,25 @@ return maki.ui.transcript_markdown(block.text, ctx.width, {
 
 ---
 
+### `maki.ui.transcript_code()` {#maki-ui-transcript_code}
+
+```lua
+maki.ui.transcript_code({code}, {width})
+```
+
+Renders structured code input and read output exactly as the transcript,
+as a temporary parity bridge. Temporary: removed after Lua code-view
+primitives reach parity, and separate from the semantic-decoration target.
+
+**Parameters:**
+
+- `{code}` (`table`) Structured `block.tool.code` source data.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
+
+**Returns:** (`table|nil`) Lines, or nil when unavailable.
+
+---
+
 ### `maki.ui.transcript_tool()` {#maki-ui-transcript_tool}
 
 ```lua
