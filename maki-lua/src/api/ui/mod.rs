@@ -172,11 +172,13 @@ pub type TranscriptMarkdownFn = fn(&str, u16, &str, &SpanStyle, &SpanStyle) -> V
 pub type TranscriptCodeFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 pub type TranscriptDiffFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 pub type TranscriptGrepFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
+pub type TranscriptInstructionsFn = fn(serde_json::Value, u16) -> Vec<SnapshotLine>;
 
 static TRANSCRIPT_MARKDOWN: OnceLock<TranscriptMarkdownFn> = OnceLock::new();
 static TRANSCRIPT_CODE: OnceLock<TranscriptCodeFn> = OnceLock::new();
 static TRANSCRIPT_DIFF: OnceLock<TranscriptDiffFn> = OnceLock::new();
 static TRANSCRIPT_GREP: OnceLock<TranscriptGrepFn> = OnceLock::new();
+static TRANSCRIPT_INSTRUCTIONS: OnceLock<TranscriptInstructionsFn> = OnceLock::new();
 
 /// Installs the renderer behind `maki.ui.transcript_markdown`. Headless hosts
 /// leave it unset, and the primitive then answers nil.
@@ -342,6 +344,52 @@ fn transcript_grep(lua: &Lua, grep: Value, width: Value) -> LuaResult<Value> {
 fn transcript_tool(lua: &Lua) -> LuaResult<Table> {
     let object = lua.create_table_with_capacity(1, 0)?;
     object.raw_set("tool", true)?;
+    Ok(object)
+}
+
+/// Installs the temporary exact-parity instructions renderer. It is removed
+/// once Lua can compose instruction bodies itself.
+pub fn set_transcript_instructions(renderer: TranscriptInstructionsFn) {
+    let _ = TRANSCRIPT_INSTRUCTIONS.set(renderer);
+}
+
+/// Renders an instruction block's body exactly as the transcript does, as a
+/// temporary parity bridge. Temporary: removed once Lua composes instruction
+/// bodies itself, and separate from the semantic-decoration target.
+///
+/// @param instructions table Structured `blocks` from an instructions block.
+/// @param width integer Wrap width in display cells, > 0.
+/// @return (table|nil) Lines, or nil when unavailable.
+#[lua_fn]
+fn transcript_instructions(lua: &Lua, instructions: Value, width: Value) -> LuaResult<Value> {
+    let width = positive_dimension(&width, WIDTH_ARG)?;
+    let instructions = lua.from_value(instructions)?;
+    let Some(render) = TRANSCRIPT_INSTRUCTIONS.get() else {
+        return Ok(Value::Nil);
+    };
+    let lines = render(instructions, width);
+    let out = lua.create_table_with_capacity(lines.len(), 0)?;
+    for (i, line) in lines.iter().enumerate() {
+        out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
+    }
+    Ok(Value::Table(out))
+}
+
+/// Returns the render object that places the host's native instructions body
+/// at this point in an instructions block render.
+///
+/// Temporary, for the instructions migration only, and separate from
+/// `transcript_tool` so a renderer cannot swap the two bodies. Lua decides
+/// where the body goes and what header surrounds it, while the host owns the
+/// body's content and every piece of its metadata: async syntax highlighting,
+/// the block budget, the truncation notice and the click offsets. A render may
+/// include it at most once, and it carries no data.
+///
+/// @return (table) `{instructions = true}`.
+#[lua_fn]
+fn transcript_instructions_body(lua: &Lua) -> LuaResult<Table> {
+    let object = lua.create_table_with_capacity(1, 0)?;
+    object.raw_set("instructions", true)?;
     Ok(object)
 }
 
@@ -1004,7 +1052,7 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_grep, transcript_tool, spinner, todo_marker, right_info,
+        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_grep, transcript_instructions, transcript_tool, transcript_instructions_body, spinner, todo_marker, right_info,
         highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,

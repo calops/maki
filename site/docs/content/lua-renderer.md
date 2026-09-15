@@ -5,6 +5,10 @@ weight: 80
 
 `maki.ui.set_block_renderer` receives structured transcript blocks. This contract is versioned with Maki. Additive fields may appear in a compatible release. Renderer plugins must ignore fields they do not use and delegate blocks they do not own.
 
+## Instructions blocks
+
+Instructions are their own block, not a tool block: `kind = "instructions"` with `id`, `parent_id`, `phase`, `header = { name = "load", text = <first path>, annotation = "+N"? }`, `blocks = { { path, content }, ... }`, and `display = { expanded, limit = { configured, visible_lines, total_lines }, truncation? }`. They carry no `tool` object and no body authority. Render the header yourself and place either the host body with `maki.ui.transcript_instructions_body()` or, when the display state is expanded with no truncation, the rows from `maki.ui.transcript_instructions({ blocks = block.blocks }, width)`.
+
 ## Tool projections
 
 A tool block may include `block.tool.diff` or `block.tool.grep`. They contain source data for a Lua renderer. They are separate from the temporary native tool-body marker.

@@ -77,6 +77,7 @@ pub enum RenderObject {
         height: u16,
     },
     ToolBody,
+    InstructionsBody,
 }
 
 /// A semantic style range in one logical line of a [`RenderObject::Lines`].
@@ -344,6 +345,9 @@ fn parse_objects(lua: &Lua, table: Table, plugin: &Arc<str>) -> BlockRender {
     if as_tool(&table) {
         return BlockRender::Objects(vec![RenderObject::ToolBody]);
     }
+    if as_instructions(&table) {
+        return BlockRender::Objects(vec![RenderObject::InstructionsBody]);
+    }
     if let Ok(Value::Table(lines)) = table.raw_get::<Value>("lines") {
         return parse_lines_object(lua, lines, table, plugin);
     }
@@ -361,6 +365,7 @@ fn parse_objects(lua: &Lua, table: Table, plugin: &Arc<str>) -> BlockRender {
             Value::Table(inner) => match as_raw(inner) {
                 Some(raw) => raw,
                 None if as_tool(inner) => Ok(RenderObject::ToolBody),
+                None if as_instructions(inner) => Ok(RenderObject::InstructionsBody),
                 None => parse_line(&item).map(|line| RenderObject::Lines {
                     lines: vec![line],
                     decorations: Vec::new(),
@@ -470,6 +475,15 @@ fn as_tool(table: &Table) -> bool {
     matches!(table.raw_get::<Value>("tool"), Ok(Value::Boolean(true)))
 }
 
+/// The instructions segment's own body marker, kept separate from the tool
+/// body so a renderer cannot swap one for the other.
+fn as_instructions(table: &Table) -> bool {
+    matches!(
+        table.raw_get::<Value>("instructions"),
+        Ok(Value::Boolean(true))
+    )
+}
+
 fn as_raw(table: &Table) -> Option<LuaResult<RenderObject>> {
     let raw: Value = table.raw_get("raw").ok()?;
     let Value::String(seq) = raw else {
@@ -557,6 +571,7 @@ mod tests {
                     .join("\n"),
                 RenderObject::Raw { seq, .. } => seq.clone(),
                 RenderObject::ToolBody => "[tool]".to_owned(),
+                RenderObject::InstructionsBody => "[instructions]".to_owned(),
             })
             .collect()
     }

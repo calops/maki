@@ -421,46 +421,113 @@ fn render_grep_results(
     (out, plan.truncated)
 }
 
-pub(crate) fn render_instructions(
-    blocks: &[InstructionBlock],
-    lines: &mut Vec<Line<'static>>,
-    max_lines: usize,
-    highlight: bool,
-) -> bool {
-    let dim = theme::current().tool_dim;
-    let mut used = 0;
-    let mut truncated = false;
-    let multi = blocks.len() > 1;
+/// One row an instructions body draws, as an index into the blocks so planning
+/// stays allocation free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InstructionRow {
+    Path(usize),
+    Code { block: usize, line: usize },
+    Notice { block: usize },
+}
 
+/// The authoritative instructions budget walk. The renderer paints these rows
+/// and the renderer projection reads the counts, so truncation cannot drift.
+pub(crate) struct InstructionsLayoutPlan {
+    pub rows: Vec<InstructionRow>,
+    pub truncated: bool,
+}
+
+pub(crate) fn plan_instructions_layout(
+    blocks: &[InstructionBlock],
+    max_lines: usize,
+) -> InstructionsLayoutPlan {
+    let multi = blocks.len() > 1;
+    let mut rows = Vec::new();
+    let mut used = 0usize;
+    let mut truncated = false;
     for (i, block) in blocks.iter().enumerate() {
         if used >= max_lines {
             truncated = true;
             break;
         }
-
         if multi {
-            lines.push(Line::from(Span::styled(block.path.clone(), dim)));
+            rows.push(InstructionRow::Path(i));
             used += 1;
             if i > 0 && used >= max_lines {
                 truncated = true;
                 break;
             }
         }
-
         if block.content.is_empty() {
             continue;
         }
-
-        let code_lines: Vec<String> = block.content.lines().map(String::from).collect();
-        let total = code_lines.len();
+        let total = block.content.lines().count();
         let remaining = max_lines.saturating_sub(used);
-        let hl = highlight.then(|| maki_highlight::Highlighter::for_path(&block.path));
-        let (rendered, was_truncated) = render_code(hl, 1, &code_lines, total, remaining);
-        used += rendered.len();
-        truncated |= was_truncated;
-        lines.extend(rendered);
+        let capped = total.min(remaining);
+        let has_truncation = should_truncate(total.saturating_sub(capped));
+        let display_count = if has_truncation { capped } else { total };
+        let before = rows.len();
+        rows.extend((0..display_count).map(|line| InstructionRow::Code { block: i, line }));
+        if has_truncation {
+            rows.push(InstructionRow::Notice { block: i });
+        }
+        used += rows.len() - before;
+        truncated |= has_truncation;
     }
-    truncated
+    InstructionsLayoutPlan { rows, truncated }
+}
+
+pub(crate) fn render_instructions(
+    blocks: &[InstructionBlock],
+    lines: &mut Vec<Line<'static>>,
+    max_lines: usize,
+    highlight: bool,
+) -> bool {
+    let plan = plan_instructions_layout(blocks, max_lines);
+    let dim = theme::current().tool_dim;
+
+    let mut code_rows = vec![0usize; blocks.len()];
+    for row in &plan.rows {
+        if let InstructionRow::Code { block, .. } = row {
+            code_rows[*block] += 1;
+        }
+    }
+    let mut hidden = vec![0usize; blocks.len()];
+    for (i, block) in blocks.iter().enumerate() {
+        hidden[i] = block.content.lines().count().saturating_sub(code_rows[i]);
+    }
+
+    let mut code_lines: Vec<Option<Vec<String>>> = vec![None; blocks.len()];
+    let mut highlighters: Vec<Option<maki_highlight::Highlighter>> = blocks
+        .iter()
+        .map(|block| highlight.then(|| maki_highlight::Highlighter::for_path(&block.path)))
+        .collect();
+
+    for row in &plan.rows {
+        match *row {
+            InstructionRow::Path(block) => {
+                lines.push(Line::from(Span::styled(blocks[block].path.clone(), dim)));
+            }
+            InstructionRow::Notice { block } => lines.push(truncation_line(hidden[block])),
+            InstructionRow::Code { block, line } => {
+                let code = code_lines[block].get_or_insert_with(|| {
+                    blocks[block]
+                        .content
+                        .lines()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                });
+                let w = nr_width(code_rows[block]);
+                let mut spans = vec![gutter(&format!("{:>w$}", line + 1))];
+                match highlighters[block].as_mut() {
+                    Some(hl) => spans.extend(highlight_spans(hl, &code[line])),
+                    None => spans.push(fallback_span(&code[line])),
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    plan.truncated
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

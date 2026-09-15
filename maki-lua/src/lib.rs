@@ -19,8 +19,9 @@ pub use api::session::SessionSnapshotFn;
 pub use api::ui::render::{BlockRender, Decoration, RenderCtx, RenderObject, renderer_generation};
 pub use api::ui::{
     RightInfoFn, SPINNER_STYLE_NAME, SPINNER_STYLE_PREFIX, TranscriptCodeFn, TranscriptDiffFn,
-    TranscriptGrepFn, TranscriptMarkdownFn, set_right_info, set_transcript_code,
-    set_transcript_diff, set_transcript_grep, set_transcript_markdown, spinner_token,
+    TranscriptGrepFn, TranscriptInstructionsFn, TranscriptMarkdownFn, set_right_info,
+    set_transcript_code, set_transcript_diff, set_transcript_grep, set_transcript_instructions,
+    set_transcript_markdown, spinner_token,
 };
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,

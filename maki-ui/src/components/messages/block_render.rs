@@ -205,6 +205,7 @@ mod tests {
                     .join("\n"),
                 RenderObject::Raw { seq, .. } => seq.clone(),
                 RenderObject::ToolBody => "[tool]".to_owned(),
+                RenderObject::InstructionsBody => "[instructions]".to_owned(),
             })
             .collect::<Vec<_>>()
             .join("|")

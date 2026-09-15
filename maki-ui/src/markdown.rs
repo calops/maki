@@ -436,6 +436,31 @@ pub(crate) fn transcript_grep(grep: serde_json::Value, _width: u16) -> Vec<Snaps
     .collect()
 }
 
+#[derive(Deserialize)]
+struct TranscriptInstructions {
+    blocks: Vec<maki_agent::InstructionBlock>,
+}
+
+/// Temporary parity bridge for an expanded, untruncated instructions body:
+/// structural lines whose syntax spans are baked from the host's highlighter,
+/// with the same per-block budget walk the native renderer uses.
+pub(crate) fn transcript_instructions(
+    instructions: serde_json::Value,
+    _width: u16,
+) -> Vec<SnapshotLine> {
+    let Ok(instructions) = serde_json::from_value::<TranscriptInstructions>(instructions) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    crate::components::code_view::render_instructions(
+        &instructions.blocks,
+        &mut lines,
+        usize::MAX,
+        true,
+    );
+    lines.iter().map(snapshot_line).collect()
+}
+
 /// Installs the host bridges behind the Lua render primitives. A once-off at
 /// UI startup; headless hosts leave the slots unset.
 pub(crate) fn install_render_bridges() {
@@ -443,6 +468,7 @@ pub(crate) fn install_render_bridges() {
     maki_lua::set_transcript_code(transcript_code);
     maki_lua::set_transcript_diff(transcript_diff);
     maki_lua::set_transcript_grep(transcript_grep);
+    maki_lua::set_transcript_instructions(transcript_instructions);
     maki_lua::set_right_info(crate::components::tool_display::right_info_spans);
 }
 

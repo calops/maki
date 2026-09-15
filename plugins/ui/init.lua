@@ -21,6 +21,7 @@ local TOOL_ANNOTATION_STYLE = "tool_annotation"
 local STATUS_IN_PROGRESS = "in_progress"
 local HEADER_SNAPSHOT = "snapshot"
 local BODY_NONE = "none"
+local INSTRUCTIONS = "instructions"
 local RESPONSES = {
   assistant = { prefix = "maki> ", prefix_style = "assistant_prefix", text_style = "assistant" },
   user = { prefix = "you> ", prefix_style = "user", text_style = "assistant" },
@@ -290,6 +291,36 @@ local function tool_lines(block, ctx)
   return out
 end
 
+-- An instruction block is its own transcript element: Lua owns the header line,
+-- the host owns the body whenever it truncates it or Lua cannot compose it.
+local function instruction_lines(block, ctx)
+  local header = block.header
+  if not header then
+    return nil
+  end
+  local spans = { { TOOL_INDICATOR, SUCCESS_STYLE }, { header.name .. TOOL_PREFIX, TOOL_PREFIX_STYLE } }
+  spans[#spans + 1] = { header.text, TOOL_HEADER_STYLE }
+  if header.annotation then
+    spans[#spans + 1] = { " (" .. header.annotation .. ")", TOOL_ANNOTATION_STYLE }
+  end
+  local display = block.display
+  local eligible = display and display.expanded and not display.truncation
+  if eligible then
+    local lines = maki.ui.transcript_instructions({ blocks = block.blocks }, ctx.width - 2)
+    if lines then
+      for _, line in ipairs(lines) do
+        table.insert(line, 1, { "  ", {} })
+      end
+      local out = { spans }
+      for _, line in ipairs(lines) do
+        out[#out + 1] = line
+      end
+      return out
+    end
+  end
+  return { spans, maki.ui.transcript_instructions_body() }
+end
+
 maki.ui.set_block_renderer(function(prev, block, ctx)
   local lines
   if block.kind == DONE then
@@ -300,6 +331,8 @@ maki.ui.set_block_renderer(function(prev, block, ctx)
     lines = thinking_lines(block, ctx)
   elseif block.kind == TOOL then
     lines = tool_lines(block, ctx)
+  elseif block.kind == INSTRUCTIONS then
+    lines = instruction_lines(block, ctx)
   else
     lines = response_lines(block, ctx)
   end

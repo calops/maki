@@ -5082,6 +5082,25 @@ parity, and separate from the semantic-decoration target.
 
 ---
 
+### `maki.ui.transcript_instructions()` {#maki-ui-transcript_instructions}
+
+```lua
+maki.ui.transcript_instructions({instructions}, {width})
+```
+
+Renders an instruction block's body exactly as the transcript does, as a
+temporary parity bridge. Temporary: removed once Lua composes instruction
+bodies itself, and separate from the semantic-decoration target.
+
+**Parameters:**
+
+- `{instructions}` (`table`) Structured `blocks` from an instructions block.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
+
+**Returns:** (`table|nil`) Lines, or nil when unavailable.
+
+---
+
 ### `maki.ui.transcript_tool()` {#maki-ui-transcript_tool}
 
 ```lua
@@ -5110,6 +5129,26 @@ maki.ui.set_block_renderer(function(prev, block, ctx)
   return maki.ui.lines({ "tool above", "tool below" }, maki.ui.transcript_tool())
 end)
 ```
+
+---
+
+### `maki.ui.transcript_instructions_body()` {#maki-ui-transcript_instructions_body}
+
+```lua
+maki.ui.transcript_instructions_body()
+```
+
+Returns the render object that places the host's native instructions body
+at this point in an instructions block render.
+
+Temporary, for the instructions migration only, and separate from
+`transcript_tool` so a renderer cannot swap the two bodies. Lua decides
+where the body goes and what header surrounds it, while the host owns the
+body's content and every piece of its metadata: async syntax highlighting,
+the block budget, the truncation notice and the click offsets. A render may
+include it at most once, and it carries no data.
+
+**Returns:** (`table`) `{instructions = true}`.
 
 ---
 

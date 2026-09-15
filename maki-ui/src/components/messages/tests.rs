@@ -3948,6 +3948,90 @@ fn lua_grep_body_ignores_projected_match_ranges() {
     );
 }
 
+/// A raw block render through the bundled chain, for synthetic blocks that do
+/// not come from a displayed message.
+fn objects_for_block(block: serde_json::Value, width: u16) -> Vec<maki_lua::RenderObject> {
+    crate::markdown::install_render_bridges();
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("plugins");
+    let reply = host.event_handle().request_render_block(
+        block,
+        RenderCtx {
+            width,
+            mode: Arc::from("build"),
+            theme_gen: theme::generation(),
+        },
+    );
+    let BlockRender::Objects(objects) = reply.recv_timeout(Duration::from_secs(5)).expect("reply")
+    else {
+        panic!("objects");
+    };
+    objects
+}
+
+/// Expanded static instruction bodies render in Lua against the settled native
+/// block, with the header composed here and the rows coming from the host.
+#[test_case(
+    vec![maki_agent::InstructionBlock { path: "AGENTS.md".into(), content: "one\ntwo".into() }]
+    ; "single_block"
+)]
+#[test_case(
+    vec![
+        maki_agent::InstructionBlock { path: "AGENTS.md".into(), content: "alpha\nbeta".into() },
+        maki_agent::InstructionBlock { path: "src/AGENTS.md".into(), content: "café α 日本".into() },
+    ]
+    ; "several_blocks"
+)]
+#[test_case(
+    vec![maki_agent::InstructionBlock { path: "notes.unknownext".into(), content: "// x\nlet y = 1;".into() }]
+    ; "unknown_syntax"
+)]
+fn lua_static_instructions_body_matches_native(blocks: Vec<maki_agent::InstructionBlock>) {
+    let _theme_lock = THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    theme::set(theme::load_by_name("dracula").expect("dracula theme"));
+    for width in [24, 80, 200] {
+        let block = block::project_instructions("t1__inst", "t1", &blocks, usize::MAX, true);
+        let objects = objects_for_block(block, width);
+        let native =
+            crate::components::tool_display::build_instructions_lines(&blocks, width, true);
+        let (native_lines, native_spinners) = settled_native(native);
+
+        let rendered =
+            block::render_with_bodies(&objects, None, None).expect("static Lua instructions body");
+        assert!(
+            rendered.instructions.is_none(),
+            "Lua must compose the instructions body"
+        );
+        assert_eq!(
+            rendered.lines,
+            with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
+            "width={width}"
+        );
+    }
+}
+
+/// A collapsed instructions body keeps the host body, whether or not the
+/// budget also cut it short: Lua places the host's own lines through the
+/// dedicated marker.
+#[test_case(2 ; "fits")]
+#[test_case(20 ; "truncated")]
+fn lua_instructions_body_uses_the_host_marker_when_collapsed(lines: usize) {
+    crate::markdown::install_render_bridges();
+    let blocks = vec![maki_agent::InstructionBlock {
+        path: "AGENTS.md".into(),
+        content: (1..=lines)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }];
+    let limit = crate::components::code_view::instruction_limit(false);
+    let block = block::project_instructions("t1__inst", "t1", &blocks, limit, false);
+    let objects = objects_for_block(block, 80);
+    assert!(
+        objects
+            .iter()
+            .any(|object| matches!(object, maki_lua::RenderObject::InstructionsBody))
+    );
+}
 /// Every non-static code case keeps the host body: live output, collapsed
 /// sections, and truncated sections alike.
 #[test_case(ToolStatus::InProgress, usize::MAX, true ; "in_progress")]

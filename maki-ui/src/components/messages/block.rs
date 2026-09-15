@@ -16,7 +16,13 @@ use crate::components::tool_display::{
     spinner_token,
 };
 use crate::components::{DisplayMessage, DisplayRole, ToolStatus};
-use crate::{components::code_view::SectionFlags, markdown::should_truncate};
+use crate::{
+    components::{
+        code_view::SectionFlags,
+        tool_display::{INSTRUCTIONS_TOOL, instructions_header},
+    },
+    markdown::should_truncate,
+};
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
 /// run of placeholder cells.
@@ -230,6 +236,54 @@ fn body_authority(message: &DisplayMessage) -> &'static str {
     } else {
         "none"
     }
+}
+
+/// The synthetic block for an instruction segment. Instructions are their own
+/// transcript element with their own header and expand state, so they are not
+/// a tool block and carry no tool body authority.
+pub(crate) fn project_instructions(
+    id: &str,
+    parent_id: &str,
+    blocks: &[maki_agent::InstructionBlock],
+    limit: usize,
+    expanded: bool,
+) -> serde_json::Value {
+    let effective = if expanded { usize::MAX } else { limit };
+    let plan = crate::components::code_view::plan_instructions_layout(blocks, effective);
+    let total = crate::components::code_view::plan_instructions_layout(blocks, usize::MAX)
+        .rows
+        .len();
+    let (text, annotation) = instructions_header(blocks);
+    let mut block = serde_json::Map::new();
+    block.insert("kind".into(), "instructions".into());
+    block.insert("id".into(), id.into());
+    block.insert("parent_id".into(), parent_id.into());
+    block.insert("phase".into(), PHASE_COMPLETE.into());
+    block.insert(
+        "header".into(),
+        serde_json::json!({ "name": INSTRUCTIONS_TOOL, "text": text, "annotation": annotation }),
+    );
+    block.insert(
+        "blocks".into(),
+        blocks
+            .iter()
+            .map(|b| serde_json::json!({ "path": b.path, "content": b.content }))
+            .collect::<Vec<_>>()
+            .into(),
+    );
+    block.insert(
+        "display".into(),
+        serde_json::json!({
+            "expanded": expanded,
+            "limit": {
+                "configured": limit,
+                "visible_lines": plan.rows.len(),
+                "total_lines": total,
+            },
+            "truncation": plan.truncated.then(|| serde_json::json!({ "hidden_lines": total - plan.rows.len() })),
+        }),
+    );
+    serde_json::Value::Object(block)
 }
 
 fn code_projection(
@@ -631,34 +685,46 @@ pub(crate) struct ToolBody {
     pub truncation: SectionFlags,
 }
 
-/// The lines a block render produced, plus the tool body it placed, if any,
-/// and the spinner spans the renderer's own lines carry.
+/// The lines a block render produced, plus the bodies it placed, if any, and
+/// the spinner spans the renderer's own lines carry.
 pub(crate) struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub raw: Vec<RawSpan>,
     pub tool: Option<ToolBody>,
+    pub instructions: Option<ToolBody>,
     pub spinner_lines: Vec<SpinnerLine>,
 }
 
 /// Render objects as ratatui lines plus the raw spans they place, with no
-/// native tool body available. See [`render_with_tools`].
+/// native body available. See [`render_with_bodies`].
 pub(crate) fn render(objects: &[RenderObject]) -> Option<Rendered> {
-    render_with_tools(objects, None)
+    render_with_bodies(objects, None, None)
 }
 
-/// [`render`] with the host's native tool body available. At most one
-/// [`RenderObject::ToolBody`] is allowed, and it must have a body to place:
-/// anything else refuses the block, so Lua can position the body but never
-/// supply its content or metadata.
+/// [`render`] with the host's native tool body available.
 pub(crate) fn render_with_tools(
     objects: &[RenderObject],
     tool_lines: Option<ToolLines>,
+) -> Option<Rendered> {
+    render_with_bodies(objects, tool_lines, None)
+}
+
+/// [`render`] with the host's native bodies available. At most one marker of
+/// each kind is allowed, and a marker must have a body to place: anything else
+/// refuses the block, so Lua can position a body but never supply its content
+/// or metadata.
+pub(crate) fn render_with_bodies(
+    objects: &[RenderObject],
+    tool_lines: Option<ToolLines>,
+    instruction_lines: Option<ToolLines>,
 ) -> Option<Rendered> {
     let mut lines = Vec::new();
     let mut raw = Vec::new();
     let mut spinner_lines = Vec::new();
     let mut tool = tool_lines;
+    let mut instructions = instruction_lines;
     let mut body = None;
+    let mut instructions_body = None;
     for object in objects {
         match object {
             RenderObject::Lines {
@@ -688,6 +754,12 @@ pub(crate) fn render_with_tools(
                 let placeholder = Line::from(Span::raw(PLACEHOLDER_CELL.repeat(width as usize)));
                 lines.extend(std::iter::repeat_n(placeholder, height as usize));
             }
+            RenderObject::InstructionsBody => {
+                let mut tl = instructions.take()?;
+                let offset = lines.len();
+                lines.append(&mut tl.lines);
+                instructions_body = Some(place_tool_body(tl, offset));
+            }
             RenderObject::ToolBody => {
                 let mut tl = tool.take()?;
                 let offset = lines.len();
@@ -700,6 +772,7 @@ pub(crate) fn render_with_tools(
         lines,
         raw,
         tool: body,
+        instructions: instructions_body,
         spinner_lines,
     })
 }

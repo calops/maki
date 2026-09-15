@@ -44,7 +44,7 @@ const TOOL_DIM_STYLE: &str = "tool_dim";
 
 const CODE_OUTPUT_DIVIDER: &str = "  ────────────";
 /// Instruction blocks have no tool of their own, so they render under this name.
-const INSTRUCTIONS_TOOL: &str = "load";
+pub(crate) const INSTRUCTIONS_TOOL: &str = "load";
 /// Stands in for a tool message whose role carries no name.
 const UNNAMED_TOOL: &str = "?";
 const THINKING_HIDDEN_HEADER: &str = "thinking> ...";
@@ -978,7 +978,7 @@ pub(crate) fn append_annotation(ann: &mut Option<String>, suffix: &str) {
     }
 }
 
-fn instructions_header(blocks: &[InstructionBlock]) -> (&str, Option<String>) {
+pub(crate) fn instructions_header(blocks: &[InstructionBlock]) -> (&str, Option<String>) {
     let path = blocks.first().map_or("", |b| b.path.as_str());
     let extra = (blocks.len() > 1).then(|| format!("+{}", blocks.len() - 1));
     (path, extra)
