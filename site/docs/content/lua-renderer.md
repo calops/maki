@@ -29,6 +29,8 @@ block.tool.body = {
 }
 ```
 
+Code blocks use `block.tool.code`. `input` normalizes `ToolInput::Code` and legacy `ToolInput::Script` to `{ language, code, display }`. Static read output uses `{ kind = "read_code", path, start_line, lines, total_lines, instructions, display }`. Each present section has its own display state and truncation metadata. A missing code output is `output = nil`.
+
 Todo bodies use `items = { { content, status, priority, marker }, ... }` rather than `text`. `status` and host-derived `marker` are one of `pending`, `in_progress`, `completed`, or `cancelled`. Use `maki.ui.todo_marker(marker)` to obtain the host-owned glyph and `todo.<status>` semantic style. `priority` is `high`, `medium`, or `low`; use the corresponding `todo.priority.<priority>` group for its layout. Empty todo bodies provide `empty = { label = "No todos.", group = "todo.empty" }`. `visible_start` and `visible_end` are 1-based inclusive logical source-line indices for text bodies and item indices for todo. `truncation` is absent when no entries are hidden. When present, `head_hidden + visible_lines + tail_hidden = total_lines`. A 0/0 visible window is only valid for an empty source or an explicit empty selection.
 
 ### Diff

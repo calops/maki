@@ -11,12 +11,12 @@ use maki_agent::{SnapshotLine, SnapshotSpan, SpanColor, SpanStyle, ToolOutput, d
 use maki_lua::{Decoration, RenderObject};
 
 use super::raw;
-use crate::components::code_view::SectionFlags;
 use crate::components::tool_display::{
     HighlightRequest, SpinnerLine, ToolLines, resolve_span_style, spinner_span, spinner_style_name,
     spinner_token,
 };
 use crate::components::{DisplayMessage, DisplayRole, ToolStatus};
+use crate::{components::code_view::SectionFlags, markdown::should_truncate};
 
 /// Bounds a raw object's rectangle so a plugin cannot ask for an unbounded
 /// run of placeholder cells.
@@ -94,6 +94,21 @@ pub(crate) fn project_with_tool_display(
     output_limit: usize,
     output_expanded: bool,
 ) -> serde_json::Value {
+    project_with_tool_sections(
+        message,
+        output_limit,
+        SectionFlags {
+            script: output_expanded,
+            output: output_expanded,
+        },
+    )
+}
+
+pub(crate) fn project_with_tool_sections(
+    message: &DisplayMessage,
+    output_limit: usize,
+    expanded: SectionFlags,
+) -> serde_json::Value {
     let mut block = serde_json::Map::new();
     block.insert("kind".into(), kind(&message.role).into());
     block.insert("text".into(), message.text.clone().into());
@@ -130,7 +145,7 @@ pub(crate) fn project_with_tool_display(
     if let DisplayRole::Tool(tool) = &message.role {
         block.insert(
             "tool".into(),
-            tool_block(message, &tool.name, output_limit, output_expanded),
+            tool_block(message, &tool.name, output_limit, expanded),
         );
     }
     serde_json::Value::Object(block)
@@ -142,7 +157,7 @@ fn tool_block(
     message: &DisplayMessage,
     name: &str,
     output_limit: usize,
-    output_expanded: bool,
+    expanded: SectionFlags,
 ) -> serde_json::Value {
     let header_text = message
         .text
@@ -175,8 +190,11 @@ fn tool_block(
         }
     }
     tool.insert("header".into(), header);
+    if let Some(code) = code_projection(message, output_limit, expanded) {
+        tool.insert("code".into(), code);
+    }
     if let Some(output) = &message.tool_output {
-        if let Some(body) = tool_body_projection(output, output_limit, output_expanded) {
+        if let Some(body) = tool_body_projection(output, output_limit, expanded.output) {
             tool.insert("body".into(), body);
         }
         match output.as_ref() {
@@ -195,6 +213,72 @@ fn tool_block(
         }
     }
     serde_json::Value::Object(tool)
+}
+
+fn code_projection(
+    message: &DisplayMessage,
+    limit: usize,
+    expanded: SectionFlags,
+) -> Option<serde_json::Value> {
+    let input = message.tool_input.as_deref().map(|input| match input {
+        maki_agent::ToolInput::Code { language, code }
+        | maki_agent::ToolInput::Script { language, code } => {
+            let total_lines = logical_line_count(code.trim_end_matches('\n'));
+            serde_json::json!({
+                "language": language,
+                "code": code,
+                "display": body_display(
+                    total_lines,
+                    visible_code_lines(total_lines, limit, expanded.script),
+                    limit,
+                    expanded.script,
+                ),
+            })
+        }
+    });
+    let output = message
+        .tool_output
+        .as_deref()
+        .and_then(|output| match output {
+            ToolOutput::ReadCode {
+                path,
+                start_line,
+                lines,
+                total_lines,
+                instructions,
+            } => Some(serde_json::json!({
+                "kind": "read_code",
+                "path": path,
+                "start_line": start_line,
+                "lines": lines,
+                "total_lines": total_lines,
+                "instructions": instructions,
+                "display": body_display(
+                    lines.len(),
+                    visible_code_lines(lines.len(), limit, expanded.output),
+                    limit,
+                    expanded.output,
+                ),
+            })),
+            _ => None,
+        });
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    Some(serde_json::json!({ "input": input, "output": output }))
+}
+
+fn visible_code_lines(total_lines: usize, limit: usize, expanded: bool) -> usize {
+    let visible_lines = if expanded || limit == 0 {
+        total_lines
+    } else {
+        total_lines.min(limit)
+    };
+    if should_truncate(total_lines.saturating_sub(visible_lines)) {
+        visible_lines
+    } else {
+        total_lines
+    }
 }
 
 fn tool_body_projection(
@@ -721,6 +805,68 @@ mod tests {
         assert_eq!(images[0]["media_type"], ImageMediaType::Png.mime());
         assert_eq!(images[0]["bytes"], PNG_PAYLOAD.len());
         assert!(!block.to_string().contains(PNG_PAYLOAD));
+    }
+
+    #[test]
+    fn code_projection_normalizes_input_and_tracks_sections() {
+        let mut message = DisplayMessage::new(
+            DisplayRole::Tool(Box::new(ToolRole {
+                id: "t".to_owned(),
+                status: ToolStatus::Success,
+                name: Arc::from("read"),
+            })),
+            "read> src/lib.rs".to_owned(),
+        );
+        message.tool_input = Some(Arc::new(maki_agent::ToolInput::Script {
+            language: "rust".to_owned(),
+            code: "one\ntwo\nthree\nfour\n".to_owned(),
+        }));
+        message.tool_output = Some(Arc::new(ToolOutput::ReadCode {
+            path: "src/lib.rs".to_owned(),
+            start_line: 10,
+            lines: vec!["four".to_owned(), "five".to_owned(), "six".to_owned()],
+            total_lines: 20,
+            instructions: None,
+        }));
+        let block = project_with_tool_sections(
+            &message,
+            2,
+            SectionFlags {
+                script: false,
+                output: true,
+            },
+        );
+        let code = &block["tool"]["code"];
+        assert_eq!(code["input"]["language"], "rust");
+        assert_eq!(code["input"]["code"], "one\ntwo\nthree\nfour\n");
+        assert_eq!(code["input"]["display"]["truncation"]["tail_hidden"], 2);
+        assert_eq!(code["output"]["kind"], "read_code");
+        assert_eq!(code["output"]["path"], "src/lib.rs");
+        assert_eq!(code["output"]["start_line"], 10);
+        assert_eq!(
+            code["output"]["display"]["truncation"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn code_projection_omits_absent_output_section() {
+        let mut message = DisplayMessage::new(
+            DisplayRole::Tool(Box::new(ToolRole {
+                id: "t".to_owned(),
+                status: ToolStatus::Success,
+                name: Arc::from("bash"),
+            })),
+            "bash> echo".to_owned(),
+        );
+        message.tool_input = Some(Arc::new(maki_agent::ToolInput::Code {
+            language: "bash".to_owned(),
+            code: "echo ok".to_owned(),
+        }));
+        let block = project_with_tool_sections(&message, 20, SectionFlags::default());
+        let code = &block["tool"]["code"];
+        assert!(code["input"].is_object());
+        assert!(code["output"].is_null());
     }
 
     #[test]
