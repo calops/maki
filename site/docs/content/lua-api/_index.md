@@ -5101,54 +5101,22 @@ bodies itself, and separate from the semantic-decoration target.
 
 ---
 
-### `maki.ui.transcript_tool()` {#maki-ui-transcript_tool}
+### `maki.ui.transcript_instructions()` {#maki-ui-transcript_instructions}
 
 ```lua
-maki.ui.transcript_tool()
+maki.ui.transcript_instructions({instructions}, {width})
 ```
 
-Returns the render object that places the host's native tool body at this
-point in a block renderer's output.
+Renders an instruction block's body exactly as the transcript does, as a
+temporary parity bridge. Temporary: removed once Lua composes instruction
+bodies itself, and separate from the semantic-decoration target.
 
-Temporary, for the tool migration only. Lua decides where the body goes and
-what surrounds it, while the host owns the body's content and every piece of
-its metadata: async syntax highlighting, spinner animation, live snapshot,
-truncation and click offsets. A render may include it at most once, and the
-host refuses the block otherwise. It carries no data, so none of that
-metadata can be forged.
+**Parameters:**
 
-**Returns:** (`table`) `{tool = true}`.
+- `{instructions}` (`table`) Structured `blocks` from an instructions block.
+- `{width}` (`integer`) Wrap width in display cells, > 0.
 
-**Example:**
-
-```lua
-maki.ui.set_block_renderer(function(prev, block, ctx)
-  if block.kind ~= "tool" then
-    return prev(block, ctx)
-  end
-  return maki.ui.lines({ "tool above", "tool below" }, maki.ui.transcript_tool())
-end)
-```
-
----
-
-### `maki.ui.transcript_instructions_body()` {#maki-ui-transcript_instructions_body}
-
-```lua
-maki.ui.transcript_instructions_body()
-```
-
-Returns the render object that places the host's native instructions body
-at this point in an instructions block render.
-
-Temporary, for the instructions migration only, and separate from
-`transcript_tool` so a renderer cannot swap the two bodies. Lua decides
-where the body goes and what header surrounds it, while the host owns the
-body's content and every piece of its metadata: async syntax highlighting,
-the block budget, the truncation notice and the click offsets. A render may
-include it at most once, and it carries no data.
-
-**Returns:** (`table`) `{instructions = true}`.
+**Returns:** (`table|nil`) Lines, or nil when unavailable.
 
 ---
 
@@ -5693,7 +5661,7 @@ maki.ui.register_decoration_group("match", { bold = true })
 maki.ui.set_block_renderer({fn})
 ```
 
-Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), `{{raw = "...", width = n, height = n}}` to request a raw sequence in a reserved rectangle, or `maki.ui.transcript_tool()` to place the host's native tool body. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
+Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), `{{raw = "...", width = n, height = n}}` to request a raw sequence in a reserved rectangle, or `{{raw = ...}}` spans. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.
 
 **Parameters:**
 

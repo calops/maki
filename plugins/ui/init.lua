@@ -20,7 +20,6 @@ local TOOL_HEADER_STYLE = "tool"
 local TOOL_ANNOTATION_STYLE = "tool_annotation"
 local STATUS_IN_PROGRESS = "in_progress"
 local HEADER_SNAPSHOT = "snapshot"
-local BODY_NONE = "none"
 local INSTRUCTIONS = "instructions"
 local RESPONSES = {
   assistant = { prefix = "maki> ", prefix_style = "assistant_prefix", text_style = "assistant" },
@@ -234,22 +233,21 @@ local function tool_lines(block, ctx)
   if tool.timestamp then
     maki.ui.right_info(spans, tool.usage, tool.timestamp, ctx.width)
   end
-  local authority = tool.body_authority
-  local body
-  if authority == nil or authority == BODY_NONE then
-    body = tool_diff(tool.diff, ctx)
-    if not body then
-      body = tool_grep(tool.grep, ctx)
-    end
-    if not body then
-      body = tool_code(tool.code, ctx)
-    end
-    if not body then
-      body = tool_body(tool.body, ctx)
-    end
+  -- The host sends only blocks it has decided Lua owns, so a block with no
+  -- body here is a renderer that cannot compose it: return nil so the host
+  -- keeps its own lines rather than showing a header with nothing under it.
+  local body = tool_diff(tool.diff, ctx)
+  if not body then
+    body = tool_grep(tool.grep, ctx)
   end
   if not body then
-    return { spans, maki.ui.transcript_tool() }
+    body = tool_code(tool.code, ctx)
+  end
+  if not body then
+    body = tool_body(tool.body, ctx)
+  end
+  if not body then
+    return nil
   end
   local out = { spans }
   for _, line in ipairs(body) do
@@ -281,7 +279,7 @@ local function instruction_lines(block, ctx)
     end
     return out
   end
-  return { spans, maki.ui.transcript_instructions_body() }
+  return nil
 end
 
 maki.ui.set_block_renderer(function(prev, block, ctx)

@@ -7,19 +7,19 @@ weight: 80
 
 ## Instructions blocks
 
-Instructions are their own block, not a tool block: `kind = "instructions"` with `id`, `parent_id`, `phase`, `header = { name = "load", text = <first path>, annotation = "+N"? }`, `blocks = { { path, content }, ... }`, and `display = { expanded, limit = { configured, visible_lines, total_lines }, truncation? }`. They carry no `tool` object and no body authority. Render the header yourself and place either the host body with `maki.ui.transcript_instructions_body()` or, when the display state is expanded with no truncation, the rows from `maki.ui.transcript_instructions({ blocks = block.blocks }, width)`.
+Instructions are their own block, not a tool block: `kind = "instructions"` with `id`, `parent_id`, `phase`, `header = { name = "load", text = <first path>, annotation = "+N"? }`, `blocks = { { path, content }, ... }`, and `display = { expanded, limit = { configured, visible_lines, total_lines }, truncation? }`. They carry no `tool` object. The host only sends this block when Lua owns it, so render the header yourself and append the rows from `maki.ui.transcript_instructions({ blocks = block.blocks }, width)`.
 
 ## Tool projections
 
-A tool block may include `block.tool.diff` or `block.tool.grep`. They contain source data for a Lua renderer. They are separate from the temporary native tool-body marker.
+A tool block may include `block.tool.diff` or `block.tool.grep`. They contain source data for a Lua renderer.
 
 ### Body authority
 
-`block.tool.body_authority` is `"none"`, `"snapshot"`, or `"live"`. A plugin that streamed a body keeps it: the host body is authoritative, and a renderer must keep `maki.ui.transcript_tool()` whenever the value is not `"none"`. Composing a body from the projection would drop the streamed one.
+`block.tool.body_authority` is `"none"`, `"snapshot"`, or `"live"`. A plugin that streamed a body keeps it: the host renders those blocks itself and never asks a renderer, so a streamed body can never be replaced. Return nil when you cannot compose a block: the host keeps its own lines instead of a header with nothing under it.
 
 ### Plain tool bodies
 
-`block.tool.body` is present for plain, Markdown, directory, todo, and legacy batch output. Unsupported and interactive collapsed bodies use the native tool marker until action dispatch is available.
+`block.tool.body` is present for plain, Markdown, directory, todo, and legacy batch output. Unsupported kinds, and bodies whose sections are collapsed or truncated, are host-rendered: the host keeps their click, highlight and snapshot metadata and does not ask a renderer for them.
 
 ```lua
 block.tool.body = {

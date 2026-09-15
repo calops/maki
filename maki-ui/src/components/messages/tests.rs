@@ -3086,21 +3086,9 @@ fn lua_tool_render(
     width: u16,
     fixture: Option<&str>,
 ) -> block::Rendered {
-    let objects = block_objects(message, width, fixture);
-    let output_lines = maki_config::ToolOutputLines::default();
-    let rctx = crate::components::tool_display::RenderCtx {
-        started_at: Instant::now(),
-        width,
-        tool_output_lines: &output_lines,
-    };
-    let body = crate::components::tool_display::build_tool_body(
-        message,
-        status,
-        &rctx,
-        SectionFlags::default(),
-    );
-    block::render_with_tools(&objects, Some(body))
-        .expect("the bundled plugin places the native body")
+    let _ = status;
+    block::render(&block_objects(message, width, fixture))
+        .expect("the bundled plugin renders the block")
 }
 
 /// The glyph the panel substitutes on every tick, so a dynamic frame never
@@ -3124,11 +3112,7 @@ fn with_spinners(
 fn rendered_spinners(
     rendered: &block::Rendered,
 ) -> Vec<crate::components::tool_display::SpinnerLine> {
-    let mut spinners = rendered.spinner_lines.clone();
-    if let Some(body) = &rendered.tool {
-        spinners.extend(body.spinner_lines.iter().cloned());
-    }
-    spinners
+    rendered.spinner_lines.clone()
 }
 
 /// A Lua-composed render normalized to the fixed repaint glyph.
@@ -3140,6 +3124,7 @@ fn composed(rendered: block::Rendered) -> Vec<Line<'static>> {
 fn assert_tool_parity(message: &DisplayMessage, status: ToolStatus, width: u16) {
     let native = native_tool_lines(message, status, width);
     let rendered = lua_tool_render(message, status, width, None);
+
     assert_eq!(
         composed(rendered),
         with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
@@ -3157,7 +3142,9 @@ fn lua_tool_header_matches_native_across_widths(width: u16) {
     const THEME: &str = "dracula";
     theme::set(theme::load_by_name(THEME).expect(THEME));
     for status in [ToolStatus::Success, ToolStatus::Error] {
-        let message = tool_message_with(status, Some("12 files"), Some("1.2k"), Some("12:00"));
+        let mut message = tool_message_with(status, Some("12 files"), Some("1.2k"), Some("12:00"));
+        message.text = "list files".to_owned();
+        message.tool_output = Some(Arc::new(ToolOutput::Plain("one\ntwo".into())));
         assert_tool_parity(&message, status, width);
     }
 }
@@ -3193,10 +3180,6 @@ fn lua_static_plain_body_matches_native(text: &str) {
             );
             let objects = block_objects(&message, width, None);
             let rendered = block::render(&objects).expect("static Lua body");
-            assert!(
-                rendered.tool.is_none(),
-                "static body must not use native marker"
-            );
             assert_eq!(
                 composed(rendered),
                 with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
@@ -3237,10 +3220,6 @@ fn lua_static_text_body_matches_native(output: ToolOutput) {
             );
             let objects = block_objects(&message, width, None);
             let rendered = block::render(&objects).expect("static Lua body");
-            assert!(
-                rendered.tool.is_none(),
-                "static body must not use native marker"
-            );
             assert_eq!(
                 composed(rendered),
                 with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
@@ -3295,7 +3274,6 @@ fg = "#ff00ff"
                 );
                 let objects = block_objects(&message, width, None);
                 let rendered = block::render(&objects).expect("static Lua body");
-                assert!(rendered.tool.is_none());
                 assert_eq!(
                     composed(rendered),
                     with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
@@ -3366,7 +3344,6 @@ fn lua_code_body(message: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
     let objects = block_objects(message, width, None);
     let rendered =
         block::render(&objects).unwrap_or_else(|| panic!("static Lua code body: {objects:?}"));
-    assert!(rendered.tool.is_none(), "Lua must render the code body");
     composed(rendered)
 }
 
@@ -3665,7 +3642,6 @@ fn lua_static_diff_body_matches_native(before: &str, after: &str) {
                 let (native_lines, native_spinners) = settled_native(native);
                 let objects = block_objects(&message, width, None);
                 let rendered = block::render(&objects).expect("static Lua diff body");
-                assert!(rendered.tool.is_none(), "Lua must render the diff body");
                 assert_eq!(
                     composed(rendered),
                     with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
@@ -3831,7 +3807,6 @@ fn lua_static_grep_body_matches_native() {
                     let (native_lines, native_spinners) = settled_native(native);
                     let objects = block_objects(&message, width, None);
                     let rendered = block::render(&objects).expect("static Lua grep body");
-                    assert!(rendered.tool.is_none(), "Lua must render the grep body");
                     assert_eq!(
                         composed(rendered),
                         with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
@@ -4015,12 +3990,7 @@ fn lua_static_instructions_body_matches_native(blocks: Vec<maki_agent::Instructi
             crate::components::tool_display::build_instructions_lines(&blocks, width, true);
         let (native_lines, native_spinners) = settled_native(native);
 
-        let rendered =
-            block::render_with_bodies(&objects, None, None).expect("static Lua instructions body");
-        assert!(
-            rendered.instructions.is_none(),
-            "Lua must compose the instructions body"
-        );
+        let rendered = block::render(&objects).expect("static Lua instructions body");
         assert_eq!(
             rendered.lines,
             with_spinners(native_lines, &native_spinners, TOOL_GLYPH),
@@ -4203,7 +4173,6 @@ fg = "#ff0000"
                     );
                     let objects = block_objects(&message, width, None);
                     let rendered = block::render(&objects).expect("Lua body");
-                    assert!(rendered.tool.is_none());
                     assert_eq!(
                         composed(rendered),
                         with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
@@ -4244,16 +4213,24 @@ fn lua_tool_uses_native_marker_for_collapsed_todo_body() {
         block::BodyOwner::Host
     );
 }
-
-/// An in-progress header carries the semantic spinner, which the panel
-/// repaints per tick; the composed lines must still match the native ones.
+/// A running tool is host-owned: its body owns the spinner, snapshot and
+/// click metadata, so the host keeps the whole block and Lua is not asked.
 #[test]
 fn lua_tool_in_progress_header_matches_native() {
-    const THEME: &str = "dracula";
-    theme::set(theme::load_by_name(THEME).expect(THEME));
     for width in [24, 80, 200] {
         let message = tool_message_with(ToolStatus::InProgress, None, None, None);
-        assert_tool_parity(&message, ToolStatus::InProgress, width);
+        assert_eq!(
+            block::tool_body_owner(
+                &message,
+                usize::MAX,
+                SectionFlags {
+                    script: true,
+                    output: true,
+                },
+            ),
+            block::BodyOwner::Host,
+            "width={width}"
+        );
     }
 }
 
@@ -4276,14 +4253,12 @@ end)
 fn lua_tool_composed_header_parity_survives_a_wrapper() {
     const THEME: &str = "dracula";
     theme::set(theme::load_by_name(THEME).expect(THEME));
-    let message = tool_message_with(ToolStatus::Success, Some("a"), Some("1.2k"), Some("12:00"));
+    let mut message =
+        tool_message_with(ToolStatus::Success, Some("a"), Some("1.2k"), Some("12:00"));
+    message.text = "list files".to_owned();
+    message.tool_output = Some(Arc::new(ToolOutput::Plain("one\ntwo".into())));
     let native = native_tool_lines(&message, ToolStatus::Success, 80);
     let rendered = lua_tool_render(&message, ToolStatus::Success, 80, Some(TOOL_WRAP_FIXTURE));
-    assert_eq!(
-        rendered.tool.as_ref().expect("body placed").offset,
-        2,
-        "the body sits under the wrapper's line and the bundled header"
-    );
 
     let plain = |text: &str| Line::from(Span::styled(text.to_owned(), theme::style_by_name("dim")));
     let mut expected = Vec::with_capacity(native.lines.len() + 2);
@@ -4335,17 +4310,23 @@ fn lua_tool_snapshot_header_matches_native() {
         }]),
     });
     let native = native_tool_lines(&message, ToolStatus::InProgress, 80);
-    let rendered = lua_tool_render(&message, ToolStatus::InProgress, 80, None);
     assert!(
-        rendered
+        native
             .spinner_lines
             .iter()
             .any(|placement| placement.line == 0 && placement.span > 0),
         "the snapshot header's spinner token must stay animatable"
     );
     assert_eq!(
-        composed(rendered),
-        with_spinners(native.lines, &native.spinner_lines, TOOL_GLYPH),
+        block::tool_body_owner(
+            &message,
+            usize::MAX,
+            SectionFlags {
+                script: true,
+                output: true,
+            },
+        ),
+        block::BodyOwner::Host
     );
 }
 

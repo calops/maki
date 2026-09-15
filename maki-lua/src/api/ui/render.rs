@@ -61,10 +61,6 @@ pub struct RenderCtx {
 /// the frame draw, and restores terminal state around it. Lua never writes to
 /// the terminal.
 ///
-/// `ToolBody` is temporary, through the tool migration only: it asks the host
-/// to place its native tool body at this point. Lua positions it but cannot
-/// carry or mutate the highlight, spinner, snapshot, truncation or interaction
-/// metadata; the host owns and validates all of it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderObject {
     Lines {
@@ -76,8 +72,6 @@ pub enum RenderObject {
         width: u16,
         height: u16,
     },
-    ToolBody,
-    InstructionsBody,
 }
 
 /// A semantic style range in one logical line of a [`RenderObject::Lines`].
@@ -342,12 +336,6 @@ fn parse_objects(lua: &Lua, table: Table, plugin: &Arc<str>) -> BlockRender {
             Err(error) => failed(error.to_string()),
         };
     }
-    if as_tool(&table) {
-        return BlockRender::Objects(vec![RenderObject::ToolBody]);
-    }
-    if as_instructions(&table) {
-        return BlockRender::Objects(vec![RenderObject::InstructionsBody]);
-    }
     if let Ok(Value::Table(lines)) = table.raw_get::<Value>("lines") {
         return parse_lines_object(lua, lines, table, plugin);
     }
@@ -364,8 +352,6 @@ fn parse_objects(lua: &Lua, table: Table, plugin: &Arc<str>) -> BlockRender {
             }),
             Value::Table(inner) => match as_raw(inner) {
                 Some(raw) => raw,
-                None if as_tool(inner) => Ok(RenderObject::ToolBody),
-                None if as_instructions(inner) => Ok(RenderObject::InstructionsBody),
                 None => parse_line(&item).map(|line| RenderObject::Lines {
                     lines: vec![line],
                     decorations: Vec::new(),
@@ -469,21 +455,6 @@ fn builtin_group_style(group: &str) -> Option<SpanStyle> {
     Some(SpanStyle::Named(name.to_owned()))
 }
 
-/// A tool-body request is a marker only: the host supplies the content and
-/// every piece of metadata, so Lua has nothing to forge.
-fn as_tool(table: &Table) -> bool {
-    matches!(table.raw_get::<Value>("tool"), Ok(Value::Boolean(true)))
-}
-
-/// The instructions segment's own body marker, kept separate from the tool
-/// body so a renderer cannot swap one for the other.
-fn as_instructions(table: &Table) -> bool {
-    matches!(
-        table.raw_get::<Value>("instructions"),
-        Ok(Value::Boolean(true))
-    )
-}
-
 fn as_raw(table: &Table) -> Option<LuaResult<RenderObject>> {
     let raw: Value = table.raw_get("raw").ok()?;
     let Value::String(seq) = raw else {
@@ -502,7 +473,7 @@ fn as_raw(table: &Table) -> Option<LuaResult<RenderObject>> {
 pub(crate) const set_block_renderer__doc: FnDoc = FnDoc {
     name: "set_block_renderer",
     args: "{fn}",
-    desc: "Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), `{{raw = \"...\", width = n, height = n}}` to request a raw sequence in a reserved rectangle, or `maki.ui.transcript_tool()` to place the host's native tool body. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.",
+    desc: "Registers the calling plugin's transcript block renderer. The callback receives `(prev, block, ctx)` and returns a list of render objects: strings, lines (tables of spans), `{{raw = \"...\", width = n, height = n}}` to request a raw sequence in a reserved rectangle, or `{{raw = ...}}` spans. Raw is a narrow payload, not an escape hatch: Rust validates the sequence, decides its absolute placement and clipping, emits it after the frame draw, and restores terminal state around it, so the callback never writes to the terminal. `prev(block, ctx)` runs the next renderer down the chain, ending at maki's default. Registration follows plugin load order, so the last plugin to register is outermost. Pass nil to remove your renderer.",
     params: &[ParamDoc {
         name: "{fn}",
         ty: "function|nil",
@@ -570,53 +541,8 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("\n"),
                 RenderObject::Raw { seq, .. } => seq.clone(),
-                RenderObject::ToolBody => "[tool]".to_owned(),
-                RenderObject::InstructionsBody => "[instructions]".to_owned(),
             })
             .collect()
-    }
-
-    #[test]
-    fn tool_body_marker_parses_as_an_object() {
-        let lua = lua_with_store();
-        register(
-            &lua,
-            PLUGIN,
-            "function(prev, block, ctx) return { { tool = true } } end",
-        );
-        assert_eq!(
-            render(&lua, json!({"kind": "tool"})),
-            BlockRender::Objects(vec![RenderObject::ToolBody])
-        );
-    }
-
-    #[test]
-    fn a_bare_tool_body_marker_parses() {
-        let lua = lua_with_store();
-        register(
-            &lua,
-            PLUGIN,
-            "function(prev, block, ctx) return { tool = true } end",
-        );
-        assert_eq!(
-            render(&lua, json!({"kind": "tool"})),
-            BlockRender::Objects(vec![RenderObject::ToolBody])
-        );
-    }
-
-    #[test]
-    fn tool_body_composes_with_surrounding_lines() {
-        let lua = lua_with_store();
-        register(
-            &lua,
-            PLUGIN,
-            "function(prev, block, ctx) return { 'above', { tool = true }, 'below' } end",
-        );
-        let BlockRender::Objects(objects) = render(&lua, json!({"kind": "tool"})) else {
-            panic!("expected objects");
-        };
-        assert_eq!(objects.len(), 3);
-        assert_eq!(objects[1], RenderObject::ToolBody);
     }
 
     #[test]

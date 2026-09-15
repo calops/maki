@@ -863,37 +863,6 @@ pub fn build_tool_lines(
     )
 }
 
-/// The body [`build_tool_lines`] appends after its header: code content, the
-/// divider, resolved output and snapshot lines, and their metadata, without
-/// the header, indicator, annotation or right-info. The Lua tool renderer
-/// draws the outer design and places this via `maki.ui.transcript_tool()`.
-pub fn build_tool_body(
-    msg: &DisplayMessage,
-    status: ToolStatus,
-    rctx: &RenderCtx,
-    expanded: SectionFlags,
-) -> ToolLines {
-    let tool_name = msg.role.tool_name().unwrap_or(UNNAMED_TOOL);
-    let (_, body) = match msg.text.split_once('\n') {
-        Some((h, b)) => (h, Some(b)),
-        None => (msg.text.as_str(), None),
-    };
-
-    let mut b = ToolLineBuilder::new(
-        rctx.width,
-        expanded,
-        rctx.tool_output_lines.get(tool_name),
-        status.into(),
-    );
-    b.apply_output_format(msg.tool_output.as_deref());
-    b.push_body(msg, body, status, rctx.started_at);
-    b.finish(
-        msg.tool_input.clone(),
-        msg.tool_output.clone(),
-        TOOL_BODY_INDENT,
-    )
-}
-
 /// What `/` searches for one tool message, built on demand instead of kept
 /// beside every rendered segment. It follows the same order
 /// [`build_tool_lines`] draws in, except the output is never truncated: a

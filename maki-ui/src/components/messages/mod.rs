@@ -19,9 +19,9 @@ use self::segment::{Segment, SegmentCache};
 
 use super::tool_display::{
     RenderCtx, RoleStyle, ToolLines, append_annotation, append_right_info, assistant_style,
-    build_instructions_lines, build_tool_body, build_tool_lines, done_style, error_style,
-    format_timestamp_now, instructions_search_text, search_text_for, thinking_indicator,
-    thinking_style, truncate_to_header, user_style,
+    build_instructions_lines, build_tool_lines, done_style, error_style, format_timestamp_now,
+    instructions_search_text, search_text_for, thinking_indicator, thinking_style,
+    truncate_to_header, user_style,
 };
 use super::{
     DisplayMessage, DisplayRole, IMAGE_PLACEHOLDER, ToolRole, ToolStatus, code_view::SectionFlags,
@@ -891,8 +891,6 @@ impl MessagesPanel {
             mode: Arc::clone(&self.render_mode),
             generation: maki_lua::renderer_generation(),
         };
-        let started_at = self.started_at;
-        let width = self.viewport_width;
         let tool_output_lines = self.tool_output_lines;
         let Self {
             messages,
@@ -901,7 +899,6 @@ impl MessagesPanel {
             lua_event_handle,
             renderer_errors,
             expanded_tools,
-            hl_worker,
             ..
         } = self;
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
@@ -922,11 +919,6 @@ impl MessagesPanel {
         let changed = block_render.poll(|plugin, generation, message| {
             renderer_errors.report(plugin, generation, message);
         });
-        let rctx = RenderCtx {
-            started_at,
-            width,
-            tool_output_lines: &tool_output_lines,
-        };
         for (index, segment) in cache.segments_mut().iter_mut().enumerate() {
             let id = BlockId::new(index as u64);
             let revision = segment.revision();
@@ -942,74 +934,16 @@ impl MessagesPanel {
                 }
                 continue;
             };
-            let applied = if let Some(block_lines) =
-                Self::instruction_lines(segment, messages, expanded_tools, &rctx)
-            {
-                match block::render_with_bodies(objects, None, Some(block_lines)) {
-                    Some(rendered) => match rendered.instructions {
-                        Some(body) => {
-                            segment.apply_tool_render(
-                                rendered.lines,
-                                rendered.spinner_lines,
-                                body,
-                                hl_worker,
-                            );
-                            true
-                        }
-                        None => {
-                            segment.set_lua_render(
-                                Some(rendered.lines),
-                                rendered.raw,
-                                rendered.spinner_lines,
-                            );
-                            true
-                        }
-                    },
-                    None => Self::reset_unrenderable(segment),
+            let applied = match block::render(objects) {
+                Some(rendered) => {
+                    segment.set_lua_render(
+                        Some(rendered.lines),
+                        rendered.raw,
+                        rendered.spinner_lines,
+                    );
+                    true
                 }
-            } else {
-                let Some(message) = segment.msg_index.and_then(|i| messages.get(i)) else {
-                    continue;
-                };
-                match &message.role {
-                    DisplayRole::Tool(tool) => {
-                        let expanded = expanded_tools.get(&tool.id).copied().unwrap_or_default();
-                        let body_lines = build_tool_body(message, tool.status, &rctx, expanded);
-                        match block::render_with_tools(objects, Some(body_lines)) {
-                            Some(rendered) => match rendered.tool {
-                                Some(body) => {
-                                    segment.apply_tool_render(
-                                        rendered.lines,
-                                        rendered.spinner_lines,
-                                        body,
-                                        hl_worker,
-                                    );
-                                    true
-                                }
-                                None => {
-                                    segment.set_lua_render(
-                                        Some(rendered.lines),
-                                        rendered.raw,
-                                        rendered.spinner_lines,
-                                    );
-                                    true
-                                }
-                            },
-                            None => Self::reset_unrenderable(segment),
-                        }
-                    }
-                    _ => match block::render(objects) {
-                        Some(rendered) => {
-                            segment.set_lua_render(
-                                Some(rendered.lines),
-                                rendered.raw,
-                                rendered.spinner_lines,
-                            );
-                            true
-                        }
-                        None => Self::reset_unrenderable(segment),
-                    },
-                }
+                None => Self::reset_unrenderable(segment),
             };
             if applied {
                 segment.mark_render_applied(revision, key.clone());
@@ -1061,26 +995,8 @@ impl MessagesPanel {
         ))
     }
 
-    /// The host's own instruction body for this segment, which the renderer may
-    /// place but never replace.
-    fn instruction_lines(
-        segment: &Segment,
-        messages: &[DisplayMessage],
-        expanded_tools: &HashMap<String, SectionFlags>,
-        rctx: &RenderCtx<'_>,
-    ) -> Option<ToolLines> {
-        let id = segment.tool_id.as_deref()?;
-        let parent = segment::instruction_parent(id)?;
-        let blocks = instructions_for(messages, parent)?;
-        let expanded = expanded_tools.get(id).copied().unwrap_or_default();
-        Some(build_instructions_lines(
-            &blocks,
-            rctx.width,
-            expanded.output,
-        ))
-    }
-
     /// Drops lines a refused render left behind, so the segment falls back to
+    /// its Rust rendering instead of keeping a stale frame.
     /// its Rust rendering instead of keeping a stale frame.
     fn reset_unrenderable(segment: &mut Segment) -> bool {
         if segment.has_lua_lines() {

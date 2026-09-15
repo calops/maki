@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::super::code_view::SectionFlags;
 use super::super::tool_display::{HighlightRequest, SPINNER_STYLE_NAME, SpinnerLine, ToolLines};
-use super::block::{RawSpan, ToolBody};
+use super::block::RawSpan;
 use super::block_render::RenderKey;
 use ratatui::text::{Line, Span};
 use std::cell::Cell;
@@ -326,51 +326,6 @@ impl Segment {
         } else {
             self.apply_highlight(tl, worker);
         }
-    }
-
-    /// Applies a block the Lua renderer composed, with the host's native tool
-    /// body placed inside it. Unlike `update_with_reuse` this never touches the
-    /// revision, because the content did not change: the same render is stable
-    /// across ticks and only re-sends a highlight when the lines it covers
-    /// actually change.
-    pub fn apply_tool_render(
-        &mut self,
-        mut lines: Vec<Line<'static>>,
-        mut spinner_lines: Vec<SpinnerLine>,
-        body: ToolBody,
-        worker: &RenderWorker,
-    ) {
-        let key = HighlightKey::from_request(body.highlight.as_ref());
-        let range = body.highlight.as_ref().map(|h| h.range);
-        if self.pending_highlight.is_some()
-            && self.highlight_key == key
-            && self.highlight_range == range
-        {
-            return;
-        }
-        let reused = body.highlight.as_ref().and_then(|req| {
-            let hl_lines = self.reuse_highlight(&key, req.range)?;
-            let (start, _) = req.range;
-            let new_end = start + hl_lines.len();
-            lines.splice(start..req.range.1, hl_lines);
-            Some((start, new_end))
-        });
-        self.pending_highlight = match (&reused, &body.highlight) {
-            (None, Some(req)) => {
-                Some(worker.send(req.input.clone(), req.output.clone(), req.limits))
-            }
-            _ => None,
-        };
-        self.highlight_range = reused.or(range);
-        self.highlight_key = key;
-        self.truncation = body.truncation;
-        spinner_lines.extend(body.spinner_lines.iter().cloned());
-        self.spinner_lines = spinner_lines;
-        self.snapshot_base = body.snapshot_base;
-        self.content_indent = body.content_indent;
-        self.lua_lines = Some(lines);
-        self.raw.clear();
-        self.invalidate_height();
     }
 
     pub fn matches_pending_highlight(&self, id: u64) -> bool {

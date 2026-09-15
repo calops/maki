@@ -12,8 +12,7 @@ use maki_lua::{Decoration, RenderObject};
 
 use super::raw;
 use crate::components::tool_display::{
-    HighlightRequest, SpinnerLine, ToolLines, resolve_span_style, spinner_span, spinner_style_name,
-    spinner_token,
+    SpinnerLine, resolve_span_style, spinner_span, spinner_style_name, spinner_token,
 };
 use crate::components::{DisplayMessage, DisplayRole, ToolStatus};
 use crate::{
@@ -758,62 +757,21 @@ fn span_color_json(color: SpanColor) -> serde_json::Value {
     }
 }
 
-/// A block render that asked for the native tool body, with its Rust-owned
-/// metadata shifted to where Lua composed it. Temporary, through the tool
-/// migration only.
-#[allow(dead_code)]
-pub(crate) struct ToolBody {
-    /// Index of the body's first line in the rendered block.
-    pub offset: usize,
-    /// Highlight request with its range already shifted. The host owns the
-    /// async highlight; Lua never sees or sets it.
-    pub highlight: Option<HighlightRequest>,
-    pub spinner_lines: Vec<SpinnerLine>,
-    pub snapshot_base: Option<usize>,
-    pub content_indent: &'static str,
-    pub truncation: SectionFlags,
-}
-
-/// The lines a block render produced, plus the bodies it placed, if any, and
-/// the spinner spans the renderer's own lines carry.
+/// The lines a block render produced, plus the raw spans it placed and the
+/// spinner spans its own lines carry.
 pub(crate) struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub raw: Vec<RawSpan>,
-    pub tool: Option<ToolBody>,
-    pub instructions: Option<ToolBody>,
     pub spinner_lines: Vec<SpinnerLine>,
 }
 
-/// Render objects as ratatui lines plus the raw spans they place, with no
-/// native body available. See [`render_with_bodies`].
+/// Render objects as ratatui lines plus the raw spans they place. A renderer
+/// that cannot compose a block returns nothing, and the host keeps its own
+/// lines.
 pub(crate) fn render(objects: &[RenderObject]) -> Option<Rendered> {
-    render_with_bodies(objects, None, None)
-}
-
-/// [`render`] with the host's native tool body available.
-pub(crate) fn render_with_tools(
-    objects: &[RenderObject],
-    tool_lines: Option<ToolLines>,
-) -> Option<Rendered> {
-    render_with_bodies(objects, tool_lines, None)
-}
-
-/// [`render`] with the host's native bodies available. At most one marker of
-/// each kind is allowed, and a marker must have a body to place: anything else
-/// refuses the block, so Lua can position a body but never supply its content
-/// or metadata.
-pub(crate) fn render_with_bodies(
-    objects: &[RenderObject],
-    tool_lines: Option<ToolLines>,
-    instruction_lines: Option<ToolLines>,
-) -> Option<Rendered> {
     let mut lines = Vec::new();
     let mut raw = Vec::new();
     let mut spinner_lines = Vec::new();
-    let mut tool = tool_lines;
-    let mut instructions = instruction_lines;
-    let mut body = None;
-    let mut instructions_body = None;
     for object in objects {
         match object {
             RenderObject::Lines {
@@ -843,25 +801,11 @@ pub(crate) fn render_with_bodies(
                 let placeholder = Line::from(Span::raw(PLACEHOLDER_CELL.repeat(width as usize)));
                 lines.extend(std::iter::repeat_n(placeholder, height as usize));
             }
-            RenderObject::InstructionsBody => {
-                let mut tl = instructions.take()?;
-                let offset = lines.len();
-                lines.append(&mut tl.lines);
-                instructions_body = Some(place_tool_body(tl, offset));
-            }
-            RenderObject::ToolBody => {
-                let mut tl = tool.take()?;
-                let offset = lines.len();
-                lines.append(&mut tl.lines);
-                body = Some(place_tool_body(tl, offset));
-            }
         }
     }
     Some(Rendered {
         lines,
         raw,
-        tool: body,
-        instructions: instructions_body,
         spinner_lines,
     })
 }
@@ -952,33 +896,9 @@ fn render_line(
     Some((Line::from(spans), spinners))
 }
 
-fn place_tool_body(mut tl: ToolLines, offset: usize) -> ToolBody {
-    let mut highlight = tl.highlight.take();
-    if let Some(request) = &mut highlight {
-        request.range = (request.range.0 + offset, request.range.1 + offset);
-    }
-    let spinner_lines = tl
-        .spinner_lines
-        .iter()
-        .map(|placement| SpinnerLine {
-            line: placement.line + offset,
-            ..placement.clone()
-        })
-        .collect();
-    ToolBody {
-        offset,
-        highlight,
-        spinner_lines,
-        snapshot_base: tl.snapshot_base.map(|base| base + offset),
-        content_indent: tl.content_indent,
-        truncation: tl.truncation,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::code_view::RenderLimits;
     use crate::{
         components::{IMAGE_PLACEHOLDER, ToolRole, ToolStatus},
         theme,
@@ -1459,84 +1379,5 @@ mod tests {
             height: 1,
         }];
         assert!(render(&objects).is_none());
-    }
-
-    fn tool_lines() -> ToolLines {
-        ToolLines {
-            lines: vec![
-                Line::raw("bash> ls"),
-                Line::raw("  a.txt"),
-                Line::raw("  b.txt"),
-            ],
-            highlight: Some(HighlightRequest {
-                range: (1, 3),
-                input: None,
-                output: None,
-                limits: RenderLimits {
-                    script: 1,
-                    output: 2,
-                },
-            }),
-            spinner_lines: vec![SpinnerLine::new(1, 0)],
-            snapshot_base: Some(1),
-            content_indent: "  ",
-            truncation: SectionFlags {
-                script: false,
-                output: true,
-            },
-        }
-    }
-
-    #[test]
-    fn tool_body_alone_keeps_the_native_lines_and_metadata() {
-        let objects = vec![RenderObject::ToolBody];
-        let rendered = render_with_tools(&objects, Some(tool_lines())).expect("body placed");
-        assert_eq!(
-            rendered.lines,
-            vec![
-                Line::raw("bash> ls"),
-                Line::raw("  a.txt"),
-                Line::raw("  b.txt")
-            ]
-        );
-        let body = rendered.tool.expect("tool body");
-        assert_eq!(body.offset, 0);
-        assert_eq!(body.highlight.expect("highlight").range, (1, 3));
-        assert_eq!(body.spinner_lines, vec![SpinnerLine::new(1, 0)]);
-        assert_eq!(body.snapshot_base, Some(1));
-        assert!(body.truncation.output);
-    }
-
-    #[test]
-    fn tool_body_metadata_is_shifted_by_the_lines_lua_puts_above_it() {
-        let objects = vec![
-            RenderObject::Lines {
-                lines: vec![SnapshotLine::plain("above".to_owned())],
-                decorations: Vec::new(),
-            },
-            RenderObject::ToolBody,
-            RenderObject::Lines {
-                lines: vec![SnapshotLine::plain("below".to_owned())],
-                decorations: Vec::new(),
-            },
-        ];
-        let rendered = render_with_tools(&objects, Some(tool_lines())).expect("body placed");
-        assert_eq!(rendered.lines.len(), 5);
-        let body = rendered.tool.expect("tool body");
-        assert_eq!(body.offset, 1);
-        assert_eq!(body.highlight.expect("highlight").range, (2, 4));
-        assert_eq!(body.spinner_lines, vec![SpinnerLine::new(2, 0)]);
-        assert_eq!(body.snapshot_base, Some(2));
-    }
-
-    #[test]
-    fn a_second_tool_body_refuses_the_block() {
-        let objects = vec![RenderObject::ToolBody, RenderObject::ToolBody];
-        assert!(render_with_tools(&objects, Some(tool_lines())).is_none());
-    }
-
-    #[test]
-    fn a_tool_body_without_a_native_body_refuses_the_block() {
-        assert!(render(&[RenderObject::ToolBody]).is_none());
     }
 }

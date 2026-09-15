@@ -322,31 +322,6 @@ fn transcript_grep(lua: &Lua, grep: Value, width: Value) -> LuaResult<Value> {
     Ok(Value::Table(out))
 }
 
-/// Returns the render object that places the host's native tool body at this
-/// point in a block renderer's output.
-///
-/// Temporary, for the tool migration only. Lua decides where the body goes and
-/// what surrounds it, while the host owns the body's content and every piece of
-/// its metadata: async syntax highlighting, spinner animation, live snapshot,
-/// truncation and click offsets. A render may include it at most once, and the
-/// host refuses the block otherwise. It carries no data, so none of that
-/// metadata can be forged.
-///
-/// @return (table) `{tool = true}`.
-/// @example
-/// maki.ui.set_block_renderer(function(prev, block, ctx)
-///   if block.kind ~= "tool" then
-///     return prev(block, ctx)
-///   end
-///   return maki.ui.lines({ "tool above", "tool below" }, maki.ui.transcript_tool())
-/// end)
-#[lua_fn]
-fn transcript_tool(lua: &Lua) -> LuaResult<Table> {
-    let object = lua.create_table_with_capacity(1, 0)?;
-    object.raw_set("tool", true)?;
-    Ok(object)
-}
-
 /// Installs the temporary exact-parity instructions renderer. It is removed
 /// once Lua can compose instruction bodies itself.
 pub fn set_transcript_instructions(renderer: TranscriptInstructionsFn) {
@@ -373,24 +348,6 @@ fn transcript_instructions(lua: &Lua, instructions: Value, width: Value) -> LuaR
         out.raw_set(i + 1, buf::line_to_lua(lua, line)?)?;
     }
     Ok(Value::Table(out))
-}
-
-/// Returns the render object that places the host's native instructions body
-/// at this point in an instructions block render.
-///
-/// Temporary, for the instructions migration only, and separate from
-/// `transcript_tool` so a renderer cannot swap the two bodies. Lua decides
-/// where the body goes and what header surrounds it, while the host owns the
-/// body's content and every piece of its metadata: async syntax highlighting,
-/// the block budget, the truncation notice and the click offsets. A render may
-/// include it at most once, and it carries no data.
-///
-/// @return (table) `{instructions = true}`.
-#[lua_fn]
-fn transcript_instructions_body(lua: &Lua) -> LuaResult<Table> {
-    let object = lua.create_table_with_capacity(1, 0)?;
-    object.raw_set("instructions", true)?;
-    Ok(object)
 }
 
 /// Returns a span that the host paints with the live spinner glyph, for use
@@ -1052,7 +1009,7 @@ lua_table! {
     /// local win = maki.ui.open_win(buf, { title = "Greeting", width = "50%", height = 5 })
     /// ```
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_grep, transcript_instructions, transcript_tool, transcript_instructions_body, spinner, todo_marker, right_info,
+        buf, theme_color, theme_style, transcript_markdown, transcript_code, transcript_diff, transcript_grep, transcript_instructions, transcript_instructions, spinner, todo_marker, right_info,
         highlight, markdown,
         humantime, terminal_size,
         display_width, truncate_text, wrap, raw, lines,
@@ -2020,13 +1977,6 @@ mod tests {
     fn dimension_errors_throw(code: &str, expected: &str) {
         let err = ui_lua().load(code).exec().unwrap_err().to_string();
         assert!(err.contains(expected), "expected {expected:?} in: {err}");
-    }
-
-    #[test]
-    fn transcript_tool_returns_the_marker() {
-        let lua = ui_lua();
-        let object: Table = lua.load("return ui.transcript_tool()").eval().unwrap();
-        assert!(object.get::<bool>("tool").unwrap());
     }
 
     #[test_case("", SPINNER_STYLE_NAME ; "default")]
